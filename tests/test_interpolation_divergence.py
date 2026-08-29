@@ -9,6 +9,7 @@ from typing import Any
 from acceptance_support import (
     REPOSITORY_ROOT,
     assert_deterministic_success,
+    deterministic_json_bytes,
     run_harness,
 )
 
@@ -20,12 +21,6 @@ FIXTURE_DIRECTORY = (
 
 def _descriptor(name: str) -> dict[str, Any]:
     return json.loads((FIXTURE_DIRECTORY / name).read_bytes())
-
-
-def _json_bytes(value: object) -> bytes:
-    return (
-        json.dumps(value, allow_nan=False, indent=2, sort_keys=True) + "\n"
-    ).encode("ascii")
 
 
 class InterpolationDivergenceAcceptanceTest(unittest.TestCase):
@@ -171,7 +166,9 @@ class InterpolationDivergenceAcceptanceTest(unittest.TestCase):
                 with tempfile.TemporaryDirectory() as temp:
                     temporary_directory = Path(temp)
                     descriptor_path = temporary_directory / "mutated.case.json"
-                    descriptor_path.write_bytes(_json_bytes(descriptor))
+                    descriptor_path.write_bytes(
+                        deterministic_json_bytes(descriptor)
+                    )
                     output_directory = temporary_directory / "artifacts"
                     result = run_harness(
                         descriptor=descriptor_path,
@@ -226,7 +223,9 @@ class InterpolationDivergenceAcceptanceTest(unittest.TestCase):
                 with tempfile.TemporaryDirectory() as temp:
                     temporary_directory = Path(temp)
                     descriptor_path = temporary_directory / f"{name}.case.json"
-                    descriptor_path.write_bytes(_json_bytes(descriptor))
+                    descriptor_path.write_bytes(
+                        deterministic_json_bytes(descriptor)
+                    )
                     output_directory = temporary_directory / "artifacts"
                     result = run_harness(
                         descriptor=descriptor_path,
@@ -238,7 +237,7 @@ class InterpolationDivergenceAcceptanceTest(unittest.TestCase):
                     self.assertEqual(result.stdout, b"")
                     self.assertEqual(
                         result.stderr,
-                        _json_bytes(
+                        deterministic_json_bytes(
                             {
                                 "error": {"code": code, "message": message},
                                 "evidence_status": "provisional",

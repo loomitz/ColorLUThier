@@ -14,6 +14,7 @@ from typing import Any
 from acceptance_support import (
     REPOSITORY_ROOT,
     assert_deterministic_success,
+    deterministic_json_bytes,
     run_harness,
 )
 
@@ -145,19 +146,6 @@ def _independent_metrics(
     }
 
 
-def _json_bytes(value: object) -> bytes:
-    return (
-        json.dumps(
-            value,
-            allow_nan=False,
-            ensure_ascii=True,
-            indent=2,
-            sort_keys=True,
-        )
-        + "\n"
-    ).encode("ascii")
-
-
 class NonlinearSeparableAcceptanceTest(unittest.TestCase):
     def test_both_interpolations_complete_the_public_round_trip(self) -> None:
         runs = {
@@ -284,7 +272,9 @@ class NonlinearSeparableAcceptanceTest(unittest.TestCase):
             tempfile.TemporaryDirectory() as second_temp,
         ):
             descriptor_path = Path(first_temp) / "strict-gate.case.json"
-            descriptor_path.write_bytes(_json_bytes(descriptor))
+            descriptor_path.write_bytes(
+                deterministic_json_bytes(descriptor)
+            )
             outputs = [
                 Path(first_temp) / "artifacts",
                 Path(second_temp) / "different-artifacts",

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import struct
 import subprocess
 import sys
@@ -13,6 +14,12 @@ from typing import Any
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+METRIC_FIELDS = {
+    "maximum_absolute_error",
+    "maximum_clf_normalized_error",
+    "mean_absolute_error",
+    "p99_absolute_error",
+}
 
 
 @dataclass(frozen=True)
@@ -64,13 +71,18 @@ def assert_deterministic_success(
     fixture_directory: Path,
     *,
     descriptor_name: str = "case.json",
-    expected_report_name: str = "expected.report.json",
+    expected_report_name: str | None = "expected.report.json",
+    require_zero_metrics: bool = True,
 ) -> SuccessfulConformanceRun:
     descriptor_path = fixture_directory / descriptor_name
     cube_path = fixture_directory / "input.cube"
     input_cube = cube_path.read_bytes()
     expected_cube = (fixture_directory / "expected.canonical.cube").read_bytes()
-    expected_report = (fixture_directory / expected_report_name).read_bytes()
+    expected_report = (
+        (fixture_directory / expected_report_name).read_bytes()
+        if expected_report_name is not None
+        else None
+    )
 
     with tempfile.TemporaryDirectory() as first_temp, tempfile.TemporaryDirectory() as second_temp:
         first_output = Path(first_temp) / "artifacts"
@@ -106,7 +118,8 @@ def assert_deterministic_success(
         )
         test.assertEqual(first.stdout, first_report)
         test.assertEqual(first_cube, expected_cube)
-        test.assertEqual(first_report, expected_report)
+        if expected_report is not None:
+            test.assertEqual(first_report, expected_report)
         test.assertEqual(second.stdout, first.stdout)
         test.assertEqual(second_cube, first_cube)
         test.assertEqual(second_report, first_report)
@@ -114,7 +127,7 @@ def assert_deterministic_success(
 
         report = json.loads(first_report)
         test.assertEqual(report["report_schema_version"], 1)
-        test.assertEqual(report["harness_version"], "0.2.0")
+        test.assertEqual(report["harness_version"], "0.3.0")
         test.assertEqual(report["overall_result"], "pass")
         test.assertEqual(
             report["evidence"],
@@ -141,15 +154,15 @@ def assert_deterministic_success(
         test.assertTrue(report["round_trip"]["serialization_binary32_identical"])
         test.assertTrue(report["round_trip"]["canonical_reevaluation_passed"])
         for evaluation_metrics in report["metrics"].values():
-            test.assertEqual(
-                evaluation_metrics,
-                {
-                    "maximum_absolute_error": 0.0,
-                    "maximum_clf_normalized_error": 0.0,
-                    "mean_absolute_error": 0.0,
-                    "p99_absolute_error": 0.0,
-                },
+            test.assertEqual(set(evaluation_metrics), METRIC_FIELDS)
+            test.assertTrue(
+                all(math.isfinite(value) for value in evaluation_metrics.values())
             )
+            if require_zero_metrics:
+                test.assertEqual(
+                    evaluation_metrics,
+                    {field: 0.0 for field in METRIC_FIELDS},
+                )
 
         return SuccessfulConformanceRun(
             input_cube=input_cube,

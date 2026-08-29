@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, cast
 
 
-HARNESS_VERSION = "0.2.0"
+HARNESS_VERSION = "0.3.0"
 REPORT_SCHEMA_VERSION = 1
 TEST_CASE_SCHEMA_VERSION = 1
 
@@ -597,13 +597,15 @@ def _evaluate_tetrahedral(cube: Cube, input_rgb: RGB) -> RGB:
             (blue, c111),
         )
 
-    return cast(
-        RGB,
-        tuple(
-            sum(weight * vertex[channel] for weight, vertex in weighted_vertices)
-            for channel in range(3)
-        ),
-    )
+    result: list[float] = []
+    for channel in range(3):
+        first, second, third, fourth = weighted_vertices
+        value = first[0] * first[1][channel]
+        value = value + second[0] * second[1][channel]
+        value = value + third[0] * third[1][channel]
+        value = value + fourth[0] * fourth[1][channel]
+        result.append(value)
+    return cast(RGB, tuple(result))
 
 
 def _evaluate(cube: Cube, input_rgb: RGB, interpolation: str) -> RGB:

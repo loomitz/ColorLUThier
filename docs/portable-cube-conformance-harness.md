@@ -39,6 +39,19 @@ interpolation. The harness never chooses a default. The fixture's static
 expected values and branch-boundary corpus are documented in
 [`DERIVATION.md`](../tests/fixtures/interpolation-divergence-2/DERIVATION.md).
 
+The affine cross-channel fixture also runs both interpolation methods over one
+Cube and one independently derived evaluation corpus:
+
+```console
+python -m portable_cube_harness --descriptor tests/fixtures/affine-cross-channel-3/trilinear.case.json --cube tests/fixtures/affine-cross-channel-3/input.cube --output-dir build/affine-cross-channel-trilinear
+python -m portable_cube_harness --descriptor tests/fixtures/affine-cross-channel-3/tetrahedral.case.json --cube tests/fixtures/affine-cross-channel-3/input.cube --output-dir build/affine-cross-channel-tetrahedral
+```
+
+Its closed-form oracle and 67-point geometry corpus are documented in
+[`DERIVATION.md`](../tests/fixtures/affine-cross-channel-3/DERIVATION.md). The
+corpus covers every stored node, the global corners, edges and faces, every cell
+center, and additional dyadic and non-dyadic interior probes.
+
 The canonical Cube uses Basic Latin text, LF line endings, red-fastest sample
 ordering, and `.9g` decimal formatting over binary32 table samples. `.9g` means
 up to nine significant decimal digits without insignificant trailing zeroes; it
@@ -46,6 +59,27 @@ is sufficient to recover every finite binary32 value with correct rounding.
 
 Successful evidence is labeled `provisional`, records Host validation as
 `not_performed`, and carries no compatibility claims.
+
+## Provisional reference arithmetic
+
+Cube table tokens are rounded to IEEE 754 binary32 when parsed, then promoted
+exactly to binary64 for evaluation. Stored-node evaluation returns the promoted
+sample directly, so the node and serialization gates compare binary32 bit
+patterns without an off-node tolerance.
+
+For current off-node evidence, trilinear interpolation applies binary64 lerps
+in fixed red, then green, then blue axis order. Tetrahedral interpolation forms
+four binary64 weighted products per channel and accumulates them explicitly
+from left to right in the selected region's vertex order. These paths do not use
+`sum`, `math.fsum`, fused multiply-add, or compensated summation. This operation
+order belongs only to the provisional harness evidence; it is not a production
+engine contract.
+
+Each completed report includes maximum, mean, and p99 absolute error plus the
+maximum CLF-style normalized error for both input and canonical Cube evaluation.
+The affine fixture permits at most `2^-20` absolute error and separately requires
+finite output, stored-node binary32 identity, and serialization binary32
+identity.
 
 ## Exit statuses
 

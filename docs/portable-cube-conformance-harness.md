@@ -20,6 +20,12 @@ interchange manifest. The command writes `canonical.cube` and `report.json` in
 the requested output directory. On a completed conformance run, stdout is
 byte-identical to `report.json`.
 
+The independent red/blue channel-permutation case uses the same public seam:
+
+```console
+python -m portable_cube_harness --descriptor tests/fixtures/red-blue-swap-2/case.json --cube tests/fixtures/red-blue-swap-2/input.cube --output-dir build/red-blue-swap-2
+```
+
 The canonical Cube uses Basic Latin text, LF line endings, red-fastest sample
 ordering, and `.9g` decimal formatting over binary32 table samples. `.9g` means
 up to nine significant decimal digits without insignificant trailing zeroes; it

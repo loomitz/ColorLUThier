@@ -1,6 +1,6 @@
 {
-  "case_id": "red-blue-swap-2-trilinear",
-  "evaluation_count": 17,
+  "case_id": "interpolation-divergence-2-trilinear",
+  "evaluation_count": 19,
   "evidence": {
     "compatibility_claims": [],
     "host_validation": "not_performed",
@@ -8,8 +8,8 @@
   },
   "harness_version": "0.2.0",
   "hashes": {
-    "canonical_cube_sha256": "3df7eea5fbaf47ca17101a1ae03e58cef79416d9830120f1bc3df48933eb23db",
-    "input_cube_sha256": "51a7af23be3a8f3b9cb494d059b931dce64286161a604b443e83e669024828fe"
+    "canonical_cube_sha256": "b6b8490a12539728711cf4046623894c9aecc494335a3e982dcf18b53aef25f9",
+    "input_cube_sha256": "e53be1a613dc9c9cd149429bb235d2ea70ff632350e1e8f5e37fbad76c735c9e"
   },
   "interpolation": "trilinear",
   "lattice_size": 2,

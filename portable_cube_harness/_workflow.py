@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, cast
 
 
-HARNESS_VERSION = "0.1.0"
+HARNESS_VERSION = "0.2.0"
 REPORT_SCHEMA_VERSION = 1
 TEST_CASE_SCHEMA_VERSION = 1
 
@@ -30,6 +30,10 @@ Binary32RGB = tuple[int, int, int]
 
 class HarnessInputError(ValueError):
     """A descriptor, Cube artifact, or output request is invalid."""
+
+    def __init__(self, message: str, *, code: str = "INPUT_INVALID") -> None:
+        super().__init__(message)
+        self.code = code
 
 
 @dataclass(frozen=True)
@@ -154,9 +158,21 @@ def _load_test_case(raw: bytes) -> TestCase:
     if not isinstance(cube_sha256, str) or _HEX_SHA256.fullmatch(cube_sha256) is None:
         raise HarnessInputError("Descriptor field 'cube.sha256' is invalid.")
 
-    interpolation = _required(root, "interpolation")
-    if interpolation != "trilinear":
-        raise HarnessInputError("This case must explicitly select trilinear interpolation.")
+    if "interpolation" not in root:
+        raise HarnessInputError(
+            "Descriptor field 'interpolation' is required.",
+            code="INTERPOLATION_REQUIRED",
+        )
+    interpolation = root["interpolation"]
+    if not isinstance(interpolation, str) or interpolation not in {
+        "trilinear",
+        "tetrahedral",
+    }:
+        raise HarnessInputError(
+            "Descriptor field 'interpolation' must select 'trilinear' or "
+            "'tetrahedral'.",
+            code="INTERPOLATION_UNSUPPORTED",
+        )
 
     oracle = _mapping(_required(root, "oracle"), "oracle")
     if _required(oracle, "kind") != "explicit_expected_values":
@@ -474,11 +490,138 @@ def _evaluate_trilinear(
     return cast(RGB, tuple(result))
 
 
+def _evaluate_tetrahedral(cube: Cube, input_rgb: RGB) -> RGB:
+    red_axis = _lattice_axis_position(input_rgb[0], cube.size)
+    green_axis = _lattice_axis_position(input_rgb[1], cube.size)
+    blue_axis = _lattice_axis_position(input_rgb[2], cube.size)
+
+    if (
+        red_axis.lower_index == red_axis.upper_index
+        and green_axis.lower_index == green_axis.upper_index
+        and blue_axis.lower_index == blue_axis.upper_index
+    ):
+        return cube.sample(
+            red_axis.lower_index,
+            green_axis.lower_index,
+            blue_axis.lower_index,
+        )
+
+    c000 = cube.sample(
+        red_axis.lower_index,
+        green_axis.lower_index,
+        blue_axis.lower_index,
+    )
+    c100 = cube.sample(
+        red_axis.upper_index,
+        green_axis.lower_index,
+        blue_axis.lower_index,
+    )
+    c010 = cube.sample(
+        red_axis.lower_index,
+        green_axis.upper_index,
+        blue_axis.lower_index,
+    )
+    c110 = cube.sample(
+        red_axis.upper_index,
+        green_axis.upper_index,
+        blue_axis.lower_index,
+    )
+    c001 = cube.sample(
+        red_axis.lower_index,
+        green_axis.lower_index,
+        blue_axis.upper_index,
+    )
+    c101 = cube.sample(
+        red_axis.upper_index,
+        green_axis.lower_index,
+        blue_axis.upper_index,
+    )
+    c011 = cube.sample(
+        red_axis.lower_index,
+        green_axis.upper_index,
+        blue_axis.upper_index,
+    )
+    c111 = cube.sample(
+        red_axis.upper_index,
+        green_axis.upper_index,
+        blue_axis.upper_index,
+    )
+
+    red = red_axis.fraction
+    green = green_axis.fraction
+    blue = blue_axis.fraction
+
+    # The strict comparisons and adjacent tie routing mirror the operational
+    # six-region convention used by the OpenColorIO reference implementation.
+    if red > green:
+        if green > blue:
+            weighted_vertices = (
+                (1.0 - red, c000),
+                (red - green, c100),
+                (green - blue, c110),
+                (blue, c111),
+            )
+        elif red > blue:
+            weighted_vertices = (
+                (1.0 - red, c000),
+                (red - blue, c100),
+                (blue - green, c101),
+                (green, c111),
+            )
+        else:
+            weighted_vertices = (
+                (1.0 - blue, c000),
+                (blue - red, c001),
+                (red - green, c101),
+                (green, c111),
+            )
+    elif blue > green:
+        weighted_vertices = (
+            (1.0 - blue, c000),
+            (blue - green, c001),
+            (green - red, c011),
+            (red, c111),
+        )
+    elif blue > red:
+        weighted_vertices = (
+            (1.0 - green, c000),
+            (green - blue, c010),
+            (blue - red, c011),
+            (red, c111),
+        )
+    else:
+        weighted_vertices = (
+            (1.0 - green, c000),
+            (green - red, c010),
+            (red - blue, c110),
+            (blue, c111),
+        )
+
+    return cast(
+        RGB,
+        tuple(
+            sum(weight * vertex[channel] for weight, vertex in weighted_vertices)
+            for channel in range(3)
+        ),
+    )
+
+
+def _evaluate(cube: Cube, input_rgb: RGB, interpolation: str) -> RGB:
+    if interpolation == "trilinear":
+        return _evaluate_trilinear(cube, input_rgb)
+    if interpolation == "tetrahedral":
+        return _evaluate_tetrahedral(cube, input_rgb)
+    raise HarnessInputError(
+        "The selected interpolation is unsupported.",
+        code="INTERPOLATION_UNSUPPORTED",
+    )
+
+
 def _evaluate_case(
-    cube: Cube, evaluations: tuple[Evaluation, ...]
+    cube: Cube, evaluations: tuple[Evaluation, ...], interpolation: str
 ) -> tuple[RGB, ...]:
     return tuple(
-        _evaluate_trilinear(cube, evaluation.input_rgb)
+        _evaluate(cube, evaluation.input_rgb, interpolation)
         for evaluation in evaluations
     )
 
@@ -511,7 +654,7 @@ def _outputs_are_finite(outputs: tuple[RGB, ...]) -> bool:
     return all(math.isfinite(component) for output in outputs for component in output)
 
 
-def _nodes_are_binary32_identical(cube: Cube) -> bool:
+def _nodes_are_binary32_identical(cube: Cube, interpolation: str) -> bool:
     index = 0
     denominator = cube.size - 1
     for blue in range(cube.size):
@@ -522,7 +665,7 @@ def _nodes_are_binary32_identical(cube: Cube) -> bool:
                     green / denominator,
                     blue / denominator,
                 )
-                output = _evaluate_trilinear(cube, input_rgb)
+                output = _evaluate(cube, input_rgb, interpolation)
                 output_bits = tuple(_float_to_binary32_bits(value) for value in output)
                 if output_bits != cube.sample_bits[index]:
                     return False
@@ -531,13 +674,15 @@ def _nodes_are_binary32_identical(cube: Cube) -> bool:
 
 
 def _evaluate_cube(
-    cube: Cube, evaluations: tuple[Evaluation, ...]
+    cube: Cube, evaluations: tuple[Evaluation, ...], interpolation: str
 ) -> EvaluationRun:
-    outputs = _evaluate_case(cube, evaluations)
+    outputs = _evaluate_case(cube, evaluations, interpolation)
     return EvaluationRun(
         metrics=_metrics(outputs, evaluations),
         finite=_outputs_are_finite(outputs),
-        nodes_binary32_identical=_nodes_are_binary32_identical(cube),
+        nodes_binary32_identical=_nodes_are_binary32_identical(
+            cube, interpolation
+        ),
     )
 
 
@@ -571,13 +716,17 @@ def run_case(
         raise HarnessInputError("The Cube artifact does not match its descriptor checksum.")
 
     input_cube = _parse_cube(input_cube_bytes)
-    input_run = _evaluate_cube(input_cube, descriptor.evaluations)
+    input_run = _evaluate_cube(
+        input_cube, descriptor.evaluations, descriptor.interpolation
+    )
 
     canonical_cube_bytes = _serialize_cube(input_cube)
     canonical_cube_sha256 = hashlib.sha256(canonical_cube_bytes).hexdigest()
     canonical_cube = _parse_cube(canonical_cube_bytes)
     serialization_identical = canonical_cube.sample_bits == input_cube.sample_bits
-    canonical_run = _evaluate_cube(canonical_cube, descriptor.evaluations)
+    canonical_run = _evaluate_cube(
+        canonical_cube, descriptor.evaluations, descriptor.interpolation
+    )
 
     input_evaluation_passed = (
         input_run.metrics["maximum_absolute_error"]

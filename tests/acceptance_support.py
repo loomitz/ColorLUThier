@@ -127,7 +127,7 @@ def assert_deterministic_success(
 
         report = json.loads(first_report)
         test.assertEqual(report["report_schema_version"], 1)
-        test.assertEqual(report["harness_version"], "0.3.0")
+        test.assertEqual(report["harness_version"], "0.4.0")
         test.assertEqual(report["overall_result"], "pass")
         test.assertEqual(
             report["evidence"],

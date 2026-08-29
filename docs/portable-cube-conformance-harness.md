@@ -115,9 +115,42 @@ Interpolation selection has two stable diagnostics:
   `tetrahedral`.
 
 Both produce status `2`, empty stdout, a provisional JSON error record on
-stderr, and no output artifacts. The umbrella `INPUT_INVALID` code remains
-provisional for all other invocation, Cube, descriptor, checksum, and output
-validation classes.
+stderr, and no output artifacts.
+
+Cube artifact validation has four stable top-level diagnostics:
+
+- `CUBE_ENCODING_INVALID`: the Cube artifact is not Basic Latin text.
+- `CUBE_STRUCTURE_INVALID`: the strict Portable Cube structure is missing,
+  duplicated, unsupported, or malformed.
+- `CUBE_LATTICE_SIZE_INVALID`: `LUT_3D_SIZE` does not declare an integer from
+  `2` through `65`, inclusive.
+- `CUBE_SAMPLE_VALUE_INVALID`: a sample is not an accepted finite decimal
+  value representable as binary32.
+
+Every Cube artifact rejection exits `2`, leaves stdout empty, emits one
+provisional JSON error record on stderr, and writes no new `canonical.cube` or
+`report.json` artifact. The error object includes the stable `code` plus a
+deterministic `reason`, structured `context`, and English `message`. The latter
+three fields are informational rather than stable identifiers; callers must
+branch only on `code`. When present, `context.line` and `context.component` are
+one-based, while `context.byte_offset` is zero-based and `context.byte_value` is
+an integer.
+
+The strict subset accepts leading blank lines and comments before exactly one
+`LUT_3D_SIZE` declaration. It rejects a missing or duplicate size declaration;
+known non-portable directives such as `TITLE`, `LUT_1D_SIZE`, `DOMAIN_MIN`,
+`DOMAIN_MAX`, `LUT_1D_INPUT_RANGE`, and `LUT_3D_INPUT_RANGE`; unknown headers;
+and standalone or inline comments after the size declaration. The declaration
+must be followed by exactly `N³` sample rows, each containing exactly three
+tokens. Malformed decimals, hexadecimal numbers, locale-dependent numbers,
+NaN, positive or negative Infinity, values outside the finite binary32 range,
+and non-ASCII input are rejected rather than normalized.
+
+The `2...65` lattice-size bound is checked before allocating or waiting for the
+declared sample table. The umbrella `INPUT_INVALID` code remains provisional for
+other invocation, descriptor, checksum, file-access, and output validation
+classes. Descriptor metadata, evaluation-domain validation, and unexpected
+internal failures are outside the Cube diagnostic taxonomy.
 
 ## Run the acceptance test
 

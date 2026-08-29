@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, cast
 
 
-HARNESS_VERSION = "0.3.0"
+HARNESS_VERSION = "0.4.0"
 REPORT_SCHEMA_VERSION = 1
 TEST_CASE_SCHEMA_VERSION = 1
 
@@ -23,6 +23,16 @@ _DECIMAL_TOKEN = re.compile(
 )
 _HEX_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _STABLE_IDENTIFIER = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+_HEADER_TOKEN = re.compile(r"^[A-Z][A-Z0-9_]*$")
+_UNSUPPORTED_CUBE_DIRECTIVES = {
+    "DOMAIN_MAX",
+    "DOMAIN_MIN",
+    "LUT_1D_INPUT_RANGE",
+    "LUT_1D_SIZE",
+    "LUT_3D_INPUT_RANGE",
+    "TITLE",
+}
+_UNKNOWN_HEADER_PREVIEW_LENGTH = 64
 
 RGB = tuple[float, float, float]
 Binary32RGB = tuple[int, int, int]
@@ -31,9 +41,35 @@ Binary32RGB = tuple[int, int, int]
 class HarnessInputError(ValueError):
     """A descriptor, Cube artifact, or output request is invalid."""
 
-    def __init__(self, message: str, *, code: str = "INPUT_INVALID") -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "INPUT_INVALID",
+        reason: str | None = None,
+        context: dict[str, object] | None = None,
+    ) -> None:
         super().__init__(message)
         self.code = code
+        self.reason = reason
+        self.context = context
+
+
+class _CubeParseFailure(ValueError):
+    """A private semantic failure while parsing Cube artifact bytes."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str,
+        reason: str,
+        context: dict[str, object],
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.reason = reason
+        self.context = context
 
 
 @dataclass(frozen=True)
@@ -267,14 +303,135 @@ def _floor_log2_ratio(numerator: int, denominator: int) -> int:
     return exponent
 
 
-def _decimal_to_binary32_bits(token: str) -> int:
+def _sample_value_failure(
+    *,
+    line_number: int,
+    sample_row: int,
+    component: int,
+    reason: str,
+    message: str,
+) -> _CubeParseFailure:
+    return _CubeParseFailure(
+        message,
+        code="CUBE_SAMPLE_VALUE_INVALID",
+        reason=reason,
+        context={
+            "component": component,
+            "line": line_number,
+            "sample_row": sample_row,
+        },
+    )
+
+
+def _outside_binary32_failure(
+    *, line_number: int, sample_row: int, component: int
+) -> _CubeParseFailure:
+    return _sample_value_failure(
+        line_number=line_number,
+        sample_row=sample_row,
+        component=component,
+        reason="outside_binary32_range",
+        message=(
+            f"Cube line {line_number} component {component} is outside the finite "
+            "binary32 range."
+        ),
+    )
+
+
+def _non_finite_token(token: str) -> bool:
+    return token.lower().lstrip("+-") in {"inf", "infinity", "nan"}
+
+
+def _unsupported_directive_failure(
+    token: str, *, line_number: int, section: str
+) -> _CubeParseFailure:
+    return _CubeParseFailure(
+        f"Cube line {line_number} uses unsupported directive {token!r}.",
+        code="CUBE_STRUCTURE_INVALID",
+        reason="unsupported_directive",
+        context={
+            "directive": token,
+            "line": line_number,
+            "section": section,
+        },
+    )
+
+
+def _unknown_header_failure(
+    token: str, *, line_number: int, section: str
+) -> _CubeParseFailure:
+    context: dict[str, object] = {
+        "line": line_number,
+        "section": section,
+    }
+    if len(token) <= _UNKNOWN_HEADER_PREVIEW_LENGTH:
+        context["header"] = token
+        message = f"Cube line {line_number} contains unknown header {token!r}."
+    else:
+        preview = token[:_UNKNOWN_HEADER_PREVIEW_LENGTH]
+        context["header_length"] = len(token)
+        context["header_preview"] = preview
+        message = (
+            f"Cube line {line_number} contains an unknown header beginning "
+            f"{preview!r}."
+        )
+    return _CubeParseFailure(
+        message,
+        code="CUBE_STRUCTURE_INVALID",
+        reason="unknown_header",
+        context=context,
+    )
+
+
+def _decimal_to_binary32_bits(
+    token: str, *, line_number: int, sample_row: int, component: int
+) -> int:
     if _DECIMAL_TOKEN.fullmatch(token) is None:
-        raise HarnessInputError(f"Cube sample token {token!r} is not a decimal number.")
+        normalized = token.lower().lstrip("+-")
+        if _non_finite_token(token):
+            reason = "non_finite_number"
+            message = (
+                f"Cube line {line_number} component {component} must be finite."
+            )
+        elif normalized.startswith("0x"):
+            reason = "hexadecimal_number"
+            message = (
+                f"Cube line {line_number} component {component} does not accept "
+                "hexadecimal numbers."
+            )
+        elif "," in token:
+            reason = "locale_dependent_number"
+            message = (
+                f"Cube line {line_number} component {component} must use a period "
+                "as the decimal separator."
+            )
+        else:
+            reason = "malformed_decimal"
+            message = (
+                f"Cube line {line_number} component {component} must be a decimal "
+                "number."
+            )
+        raise _sample_value_failure(
+            line_number=line_number,
+            sample_row=sample_row,
+            component=component,
+            reason=reason,
+            message=message,
+        )
 
     try:
         value = Decimal(token)
     except InvalidOperation as error:
-        raise HarnessInputError(f"Cube sample token {token!r} is malformed.") from error
+        raise _sample_value_failure(
+            line_number=line_number,
+            sample_row=sample_row,
+            component=component,
+            reason="malformed_decimal",
+            message=(
+                f"Cube line {line_number} component {component} must be a decimal "
+                "number."
+            ),
+        ) from error
 
     sign = 1 if value.is_signed() else 0
     if value.is_zero():
@@ -284,7 +441,11 @@ def _decimal_to_binary32_bits(token: str) -> int:
     magnitude = value.copy_abs()
     adjusted_exponent = magnitude.adjusted()
     if adjusted_exponent > 38:
-        raise HarnessInputError("A Cube sample is outside the finite binary32 range.")
+        raise _outside_binary32_failure(
+            line_number=line_number,
+            sample_row=sample_row,
+            component=component,
+        )
     if adjusted_exponent < -46:
         return sign << 31
 
@@ -306,7 +467,11 @@ def _decimal_to_binary32_bits(token: str) -> int:
             significand = 1 << 23
             exponent += 1
         if exponent > 127:
-            raise HarnessInputError("A Cube sample is outside the finite binary32 range.")
+            raise _outside_binary32_failure(
+                line_number=line_number,
+                sample_row=sample_row,
+                component=component,
+            )
 
         exponent_bits = exponent + 127
         fraction_bits = significand - (1 << 23)
@@ -338,7 +503,15 @@ def _parse_cube(raw: bytes) -> Cube:
     try:
         text = raw.decode("ascii")
     except UnicodeDecodeError as error:
-        raise HarnessInputError("The Cube artifact must use Basic Latin text.") from error
+        raise _CubeParseFailure(
+            "The Cube artifact must use Basic Latin text.",
+            code="CUBE_ENCODING_INVALID",
+            reason="non_ascii_text",
+            context={
+                "byte_offset": error.start,
+                "byte_value": raw[error.start],
+            },
+        ) from error
 
     size: int | None = None
     samples: list[Binary32RGB] = []
@@ -349,39 +522,184 @@ def _parse_cube(raw: bytes) -> Cube:
             if not stripped or stripped.startswith("#"):
                 continue
             tokens = stripped.split()
-            if len(tokens) != 2 or tokens[0] != "LUT_3D_SIZE":
-                raise HarnessInputError(
-                    f"Cube line {line_number} must declare LUT_3D_SIZE."
+            first_token = tokens[0]
+            if first_token in _UNSUPPORTED_CUBE_DIRECTIVES:
+                raise _unsupported_directive_failure(
+                    first_token,
+                    line_number=line_number,
+                    section="preamble",
                 )
-            if not tokens[1].isdigit():
-                raise HarnessInputError("The Cube lattice size must be an integer.")
-            size = int(tokens[1])
+            if first_token != "LUT_3D_SIZE":
+                if _HEADER_TOKEN.fullmatch(first_token) is not None:
+                    raise _unknown_header_failure(
+                        first_token,
+                        line_number=line_number,
+                        section="preamble",
+                    )
+                raise _CubeParseFailure(
+                    f"Cube line {line_number} appears before LUT_3D_SIZE.",
+                    code="CUBE_STRUCTURE_INVALID",
+                    reason="missing_size_declaration",
+                    context={"declaration": "LUT_3D_SIZE"},
+                )
+            if len(tokens) != 2:
+                raise _CubeParseFailure(
+                    f"Cube line {line_number} must contain LUT_3D_SIZE and one "
+                    "integer value.",
+                    code="CUBE_STRUCTURE_INVALID",
+                    reason="malformed_size_declaration",
+                    context={
+                        "actual_tokens": len(tokens),
+                        "declaration": "LUT_3D_SIZE",
+                        "expected_tokens": 2,
+                        "line": line_number,
+                    },
+                )
+
+            size_token = tokens[1]
+            if not size_token.isdigit():
+                raise _CubeParseFailure(
+                    f"Cube line {line_number} lattice size must be an integer.",
+                    code="CUBE_LATTICE_SIZE_INVALID",
+                    reason="size_not_integer",
+                    context={
+                        "line": line_number,
+                        "maximum": 65,
+                        "minimum": 2,
+                    },
+                )
+
+            normalized_size = size_token.lstrip("0") or "0"
+            if len(normalized_size) > 2:
+                raise _CubeParseFailure(
+                    f"Cube line {line_number} lattice size must be between 2 and 65.",
+                    code="CUBE_LATTICE_SIZE_INVALID",
+                    reason="size_out_of_range",
+                    context={
+                        "line": line_number,
+                        "maximum": 65,
+                        "minimum": 2,
+                        "value_digits": len(normalized_size),
+                    },
+                )
+            size = int(normalized_size)
             if size < 2 or size > 65:
-                raise HarnessInputError("The Cube lattice size must be between 2 and 65.")
+                raise _CubeParseFailure(
+                    f"Cube line {line_number} lattice size must be between 2 and 65.",
+                    code="CUBE_LATTICE_SIZE_INVALID",
+                    reason="size_out_of_range",
+                    context={
+                        "line": line_number,
+                        "maximum": 65,
+                        "minimum": 2,
+                        "value": size,
+                    },
+                )
             continue
 
-        if not stripped or stripped.startswith("#"):
-            raise HarnessInputError(
-                f"Cube line {line_number} is invalid inside the sample table."
+        if not stripped:
+            raise _CubeParseFailure(
+                f"Cube line {line_number} is blank after LUT_3D_SIZE.",
+                code="CUBE_STRUCTURE_INVALID",
+                reason="blank_line_after_size",
+                context={"line": line_number, "section": "sample_table"},
+            )
+        if "#" in stripped:
+            raise _CubeParseFailure(
+                f"Cube line {line_number} contains a comment after LUT_3D_SIZE.",
+                code="CUBE_STRUCTURE_INVALID",
+                reason="comment_after_size",
+                context={"line": line_number, "section": "sample_table"},
             )
         tokens = stripped.split()
+        first_token = tokens[0]
+        if first_token == "LUT_3D_SIZE":
+            raise _CubeParseFailure(
+                f"Cube line {line_number} repeats LUT_3D_SIZE.",
+                code="CUBE_STRUCTURE_INVALID",
+                reason="duplicate_size_declaration",
+                context={
+                    "declaration": "LUT_3D_SIZE",
+                    "line": line_number,
+                },
+            )
+        if first_token in _UNSUPPORTED_CUBE_DIRECTIVES:
+            raise _unsupported_directive_failure(
+                first_token,
+                line_number=line_number,
+                section="sample_table",
+            )
+        if (
+            _HEADER_TOKEN.fullmatch(first_token) is not None
+            and not _non_finite_token(first_token)
+        ):
+            raise _unknown_header_failure(
+                first_token,
+                line_number=line_number,
+                section="sample_table",
+            )
+
+        expected_count = size**3
+        sample_row = len(samples) + 1
+        if sample_row > expected_count:
+            raise _CubeParseFailure(
+                f"Cube lattice size {size} requires {expected_count} sample rows; "
+                f"line {line_number} starts row {sample_row}.",
+                code="CUBE_STRUCTURE_INVALID",
+                reason="too_many_sample_rows",
+                context={
+                    "actual_rows": sample_row,
+                    "expected_rows": expected_count,
+                    "lattice_size": size,
+                    "line": line_number,
+                },
+            )
         if len(tokens) != 3:
-            raise HarnessInputError(
-                f"Cube line {line_number} must contain exactly three samples."
+            raise _CubeParseFailure(
+                f"Cube line {line_number} must contain exactly three sample values.",
+                code="CUBE_STRUCTURE_INVALID",
+                reason="sample_token_count",
+                context={
+                    "actual_tokens": len(tokens),
+                    "expected_tokens": 3,
+                    "line": line_number,
+                    "sample_row": sample_row,
+                },
             )
         samples.append(
             cast(
                 Binary32RGB,
-                tuple(_decimal_to_binary32_bits(token) for token in tokens),
+                tuple(
+                    _decimal_to_binary32_bits(
+                        token,
+                        line_number=line_number,
+                        sample_row=sample_row,
+                        component=component,
+                    )
+                    for component, token in enumerate(tokens, start=1)
+                ),
             )
         )
 
     if size is None:
-        raise HarnessInputError("The Cube artifact is missing LUT_3D_SIZE.")
+        raise _CubeParseFailure(
+            "The Cube artifact is missing LUT_3D_SIZE.",
+            code="CUBE_STRUCTURE_INVALID",
+            reason="missing_size_declaration",
+            context={"declaration": "LUT_3D_SIZE"},
+        )
     expected_count = size**3
     if len(samples) != expected_count:
-        raise HarnessInputError(
-            f"The Cube artifact must contain exactly {expected_count} sample rows."
+        raise _CubeParseFailure(
+            f"Cube lattice size {size} requires {expected_count} sample rows; "
+            f"found {len(samples)}.",
+            code="CUBE_STRUCTURE_INVALID",
+            reason="too_few_sample_rows",
+            context={
+                "actual_rows": len(samples),
+                "expected_rows": expected_count,
+                "lattice_size": size,
+            },
         )
     return Cube(size=size, sample_bits=tuple(samples))
 
@@ -717,7 +1035,15 @@ def run_case(
     if input_cube_sha256 != descriptor.cube_sha256:
         raise HarnessInputError("The Cube artifact does not match its descriptor checksum.")
 
-    input_cube = _parse_cube(input_cube_bytes)
+    try:
+        input_cube = _parse_cube(input_cube_bytes)
+    except _CubeParseFailure as error:
+        raise HarnessInputError(
+            str(error),
+            code=error.code,
+            reason=error.reason,
+            context=error.context,
+        ) from error
     input_run = _evaluate_cube(
         input_cube, descriptor.evaluations, descriptor.interpolation
     )

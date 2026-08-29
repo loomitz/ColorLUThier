@@ -20,10 +20,21 @@ class _ArgumentParser(argparse.ArgumentParser):
         raise HarnessInputError(f"The command invocation is invalid: {message}.")
 
 
-def _error_bytes(code: str, message: str) -> bytes:
+def _error_bytes(
+    code: str,
+    message: str,
+    *,
+    reason: str | None = None,
+    context: dict[str, object] | None = None,
+) -> bytes:
+    error: dict[str, object] = {"code": code, "message": message}
+    if reason is not None:
+        error["reason"] = reason
+    if context is not None:
+        error["context"] = context
     return _deterministic_json_bytes(
         {
-            "error": {"code": code, "message": message},
+            "error": error,
             "evidence_status": "provisional",
             "report_schema_version": REPORT_SCHEMA_VERSION,
         }
@@ -52,7 +63,14 @@ def main() -> int:
             output_dir=args.output_dir,
         )
     except HarnessInputError as error:
-        sys.stderr.buffer.write(_error_bytes(error.code, str(error)))
+        sys.stderr.buffer.write(
+            _error_bytes(
+                error.code,
+                str(error),
+                reason=error.reason,
+                context=error.context,
+            )
+        )
         return 2
     except Exception:
         sys.stderr.buffer.write(

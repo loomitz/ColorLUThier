@@ -1,0 +1,137 @@
+{
+  "case_id": "identity-2-trilinear",
+  "cube": {
+    "sha256": "20d34ef94366f7423b91ba245909710676db18753d83349fa81f922c61d9acae"
+  },
+  "evaluations": [
+    {
+      "expected": [
+        0,
+        0,
+        0
+      ],
+      "id": "node-000",
+      "input": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "expected": [
+        1,
+        0,
+        0
+      ],
+      "id": "node-100",
+      "input": [
+        1,
+        0,
+        0
+      ]
+    },
+    {
+      "expected": [
+        0,
+        1,
+        0
+      ],
+      "id": "node-010",
+      "input": [
+        0,
+        1,
+        0
+      ]
+    },
+    {
+      "expected": [
+        1,
+        1,
+        0
+      ],
+      "id": "node-110",
+      "input": [
+        1,
+        1,
+        0
+      ]
+    },
+    {
+      "expected": [
+        0,
+        0,
+        1
+      ],
+      "id": "node-001",
+      "input": [
+        0,
+        0,
+        1
+      ]
+    },
+    {
+      "expected": [
+        1,
+        0,
+        1
+      ],
+      "id": "node-101",
+      "input": [
+        1,
+        0,
+        1
+      ]
+    },
+    {
+      "expected": [
+        0,
+        1,
+        1
+      ],
+      "id": "node-011",
+      "input": [
+        0,
+        1,
+        1
+      ]
+    },
+    {
+      "expected": [
+        1,
+        1,
+        1
+      ],
+      "id": "node-111",
+      "input": [
+        1,
+        1,
+        1
+      ]
+    },
+    {
+      "expected": [
+        0.25,
+        0.5,
+        0.75
+      ],
+      "id": "interior-asymmetric",
+      "input": [
+        0.25,
+        0.5,
+        0.75
+      ]
+    }
+  ],
+  "gates": {
+    "maximum_absolute_error": 9.5367431640625e-07,
+    "require_finite_outputs": true,
+    "require_node_binary32_identity": true,
+    "require_serialization_binary32_identity": true
+  },
+  "interpolation": "trilinear",
+  "oracle": {
+    "kind": "explicit_expected_values",
+    "provenance": "Manually authored identity values; expected RGB equals input RGB."
+  },
+  "test_case_schema_version": 1
+}

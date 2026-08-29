@@ -1,0 +1,43 @@
+{
+  "case_id": "identity-2-trilinear",
+  "evaluation_count": 9,
+  "evidence": {
+    "compatibility_claims": [],
+    "host_validation": "not_performed",
+    "status": "provisional"
+  },
+  "harness_version": "0.1.0",
+  "hashes": {
+    "canonical_cube_sha256": "c8bce4299c8606d5ca59a4724f46e484e430c42d506cfc2a3f30bbe84d5199cc",
+    "input_cube_sha256": "20d34ef94366f7423b91ba245909710676db18753d83349fa81f922c61d9acae"
+  },
+  "interpolation": "trilinear",
+  "lattice_size": 2,
+  "metrics": {
+    "canonical_evaluation": {
+      "maximum_absolute_error": 0.0,
+      "maximum_clf_normalized_error": 0.0,
+      "mean_absolute_error": 0.0,
+      "p99_absolute_error": 0.0
+    },
+    "input_evaluation": {
+      "maximum_absolute_error": 0.0,
+      "maximum_clf_normalized_error": 0.0,
+      "mean_absolute_error": 0.0,
+      "p99_absolute_error": 0.0
+    }
+  },
+  "overall_result": "pass",
+  "report_schema_version": 1,
+  "round_trip": {
+    "canonical_node_evaluation_binary32_identical": true,
+    "canonical_reevaluation_passed": true,
+    "input_node_evaluation_binary32_identical": true,
+    "serialization_binary32_identical": true
+  },
+  "sample_count": 8,
+  "validation": {
+    "errors": [],
+    "result": "pass"
+  }
+}

@@ -1,0 +1,241 @@
+{
+  "case_id": "red-blue-swap-2-trilinear",
+  "cube": {
+    "sha256": "51a7af23be3a8f3b9cb494d059b931dce64286161a604b443e83e669024828fe"
+  },
+  "evaluations": [
+    {
+      "expected": [
+        0,
+        0,
+        0
+      ],
+      "id": "node-000",
+      "input": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "expected": [
+        0,
+        0,
+        1
+      ],
+      "id": "node-100",
+      "input": [
+        1,
+        0,
+        0
+      ]
+    },
+    {
+      "expected": [
+        0,
+        1,
+        0
+      ],
+      "id": "node-010",
+      "input": [
+        0,
+        1,
+        0
+      ]
+    },
+    {
+      "expected": [
+        0,
+        1,
+        1
+      ],
+      "id": "node-110",
+      "input": [
+        1,
+        1,
+        0
+      ]
+    },
+    {
+      "expected": [
+        1,
+        0,
+        0
+      ],
+      "id": "node-001",
+      "input": [
+        0,
+        0,
+        1
+      ]
+    },
+    {
+      "expected": [
+        1,
+        0,
+        1
+      ],
+      "id": "node-101",
+      "input": [
+        1,
+        0,
+        1
+      ]
+    },
+    {
+      "expected": [
+        1,
+        1,
+        0
+      ],
+      "id": "node-011",
+      "input": [
+        0,
+        1,
+        1
+      ]
+    },
+    {
+      "expected": [
+        1,
+        1,
+        1
+      ],
+      "id": "node-111",
+      "input": [
+        1,
+        1,
+        1
+      ]
+    },
+    {
+      "expected": [
+        0,
+        0,
+        0.25
+      ],
+      "id": "primary-red-quarter",
+      "input": [
+        0.25,
+        0,
+        0
+      ]
+    },
+    {
+      "expected": [
+        0,
+        0.5,
+        0
+      ],
+      "id": "primary-green-half",
+      "input": [
+        0,
+        0.5,
+        0
+      ]
+    },
+    {
+      "expected": [
+        0.75,
+        0,
+        0
+      ],
+      "id": "primary-blue-three-quarter",
+      "input": [
+        0,
+        0,
+        0.75
+      ]
+    },
+    {
+      "expected": [
+        0,
+        0.75,
+        0.25
+      ],
+      "id": "secondary-yellow",
+      "input": [
+        0.25,
+        0.75,
+        0
+      ]
+    },
+    {
+      "expected": [
+        0.75,
+        0.25,
+        0
+      ],
+      "id": "secondary-cyan",
+      "input": [
+        0,
+        0.25,
+        0.75
+      ]
+    },
+    {
+      "expected": [
+        0.75,
+        0,
+        0.25
+      ],
+      "id": "secondary-magenta",
+      "input": [
+        0.25,
+        0,
+        0.75
+      ]
+    },
+    {
+      "expected": [
+        0.25,
+        0.25,
+        0.25
+      ],
+      "id": "neutral-quarter",
+      "input": [
+        0.25,
+        0.25,
+        0.25
+      ]
+    },
+    {
+      "expected": [
+        0.5,
+        0.5,
+        0.5
+      ],
+      "id": "neutral-half",
+      "input": [
+        0.5,
+        0.5,
+        0.5
+      ]
+    },
+    {
+      "expected": [
+        0.75,
+        0.75,
+        0.75
+      ],
+      "id": "neutral-three-quarter",
+      "input": [
+        0.75,
+        0.75,
+        0.75
+      ]
+    }
+  ],
+  "gates": {
+    "maximum_absolute_error": 9.5367431640625e-07,
+    "require_finite_outputs": true,
+    "require_node_binary32_identity": true,
+    "require_serialization_binary32_identity": true
+  },
+  "interpolation": "trilinear",
+  "oracle": {
+    "kind": "explicit_expected_values",
+    "provenance": "Manually authored red-blue swap values; expected RGB is input BGR."
+  },
+  "test_case_schema_version": 1
+}

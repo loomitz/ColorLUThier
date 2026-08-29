@@ -52,6 +52,19 @@ Its closed-form oracle and 67-point geometry corpus are documented in
 corpus covers every stored node, the global corners, edges and faces, every cell
 center, and additional dyadic and non-dyadic interior probes.
 
+The separable nonlinear fixture measures interpolation approximation against a
+closed-form quadratic oracle:
+
+```console
+python -m portable_cube_harness --descriptor tests/fixtures/nonlinear-separable-5/trilinear.case.json --cube tests/fixtures/nonlinear-separable-5/input.cube --output-dir build/nonlinear-separable-trilinear
+python -m portable_cube_harness --descriptor tests/fixtures/nonlinear-separable-5/tetrahedral.case.json --cube tests/fixtures/nonlinear-separable-5/input.cube --output-dir build/nonlinear-separable-tetrahedral
+```
+
+Its 95-point corpus contains complete neutral, primary, and secondary ramps plus
+32 deterministic interior samples from a recorded LCG32 seed. The analytic
+curve, generator, expected metrics, and gates are documented in
+[`DERIVATION.md`](../tests/fixtures/nonlinear-separable-5/DERIVATION.md).
+
 The canonical Cube uses Basic Latin text, LF line endings, red-fastest sample
 ordering, and `.9g` decimal formatting over binary32 table samples. `.9g` means
 up to nine significant decimal digits without insignificant trailing zeroes; it
@@ -79,7 +92,8 @@ Each completed report includes maximum, mean, and p99 absolute error plus the
 maximum CLF-style normalized error for both input and canonical Cube evaluation.
 The affine fixture permits at most `2^-20` absolute error and separately requires
 finite output, stored-node binary32 identity, and serialization binary32
-identity.
+identity. The nonlinear fixture uses the same explicit `2^-20` gate and has a
+closed-form maximum approximation error of `2^-21`.
 
 ## Exit statuses
 
@@ -88,8 +102,11 @@ identity.
 - `2`: invocation, descriptor, Cube, checksum, or output validation failed.
 - `3`: the harness encountered an unexpected internal error.
 
-Success leaves stderr empty. Validation and internal failures emit a
-machine-readable, provisional error record to stderr.
+A completed valid run, whether it passes with status `0` or misses a gate with
+status `1`, leaves stderr empty, writes `canonical.cube` and `report.json`, and
+copies the report bytes to stdout. A status `1` report has a successful input
+validation result and an `overall_result` of `fail`. Validation and internal
+failures emit a machine-readable, provisional error record to stderr.
 
 Interpolation selection has two stable diagnostics:
 

@@ -39,6 +39,9 @@ EXPECTED_CASE_IDS = (
     "red-blue-swap-2-trilinear",
     "red-blue-swap-65-tetrahedral",
 )
+EXPECTED_COMPLETE_CORPUS_REPORT_SHA256 = (
+    "b8e0144c08d6a768d1cda17d7fe2bbc5c7117e9199856eca9061ae8a6e29b2a6"
+)
 AGGREGATE_FIELDS = {
     "case_count",
     "cases",
@@ -525,10 +528,11 @@ class CompleteCorpusAcceptanceTest(unittest.TestCase):
             self.assertEqual(cube_sets[0], cube_sets[1])
             self.assertEqual(artifact_sets[0], artifact_sets[1])
             self.assertEqual(corpus_runs[0][5].stdout, corpus_runs[1][5].stdout)
-            self.assertEqual(
-                hashlib.sha256(corpus_runs[0][5].stdout).hexdigest(),
-                hashlib.sha256(corpus_runs[1][5].stdout).hexdigest(),
-            )
+            for corpus_run in corpus_runs:
+                self.assertEqual(
+                    hashlib.sha256(corpus_run[5].stdout).hexdigest(),
+                    EXPECTED_COMPLETE_CORPUS_REPORT_SHA256,
+                )
 
             (
                 descriptor_root,

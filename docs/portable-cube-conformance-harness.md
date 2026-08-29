@@ -307,3 +307,9 @@ python -m unittest discover -s tests -v
 The acceptance test invokes only the public command as a subprocess. It observes
 the generated files, stdout, stderr, and exit status without importing harness
 implementation modules.
+
+GitHub Actions runs that complete positive and negative suite with Python 3.12
+on the current GitHub-hosted Ubuntu, macOS, and Windows runners. The complete
+corpus aggregate has a fixed SHA-256 expectation; because it records every
+per-case report and canonical Cube checksum, platform-dependent artifact drift
+fails the same public acceptance seam.

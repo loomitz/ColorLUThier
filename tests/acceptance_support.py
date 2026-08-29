@@ -60,13 +60,17 @@ def cube_sample_bits(cube_bytes: bytes) -> list[tuple[bytes, bytes, bytes]]:
 
 
 def assert_deterministic_success(
-    test: unittest.TestCase, fixture_directory: Path
+    test: unittest.TestCase,
+    fixture_directory: Path,
+    *,
+    descriptor_name: str = "case.json",
+    expected_report_name: str = "expected.report.json",
 ) -> SuccessfulConformanceRun:
-    descriptor_path = fixture_directory / "case.json"
+    descriptor_path = fixture_directory / descriptor_name
     cube_path = fixture_directory / "input.cube"
     input_cube = cube_path.read_bytes()
     expected_cube = (fixture_directory / "expected.canonical.cube").read_bytes()
-    expected_report = (fixture_directory / "expected.report.json").read_bytes()
+    expected_report = (fixture_directory / expected_report_name).read_bytes()
 
     with tempfile.TemporaryDirectory() as first_temp, tempfile.TemporaryDirectory() as second_temp:
         first_output = Path(first_temp) / "artifacts"
@@ -92,6 +96,14 @@ def assert_deterministic_success(
         first_report = (first_output / "report.json").read_bytes()
         second_report = (second_output / "report.json").read_bytes()
 
+        test.assertEqual(
+            sorted(path.name for path in first_output.iterdir()),
+            ["canonical.cube", "report.json"],
+        )
+        test.assertEqual(
+            sorted(path.name for path in second_output.iterdir()),
+            ["canonical.cube", "report.json"],
+        )
         test.assertEqual(first.stdout, first_report)
         test.assertEqual(first_cube, expected_cube)
         test.assertEqual(first_report, expected_report)
@@ -102,7 +114,7 @@ def assert_deterministic_success(
 
         report = json.loads(first_report)
         test.assertEqual(report["report_schema_version"], 1)
-        test.assertEqual(report["harness_version"], "0.1.0")
+        test.assertEqual(report["harness_version"], "0.2.0")
         test.assertEqual(report["overall_result"], "pass")
         test.assertEqual(
             report["evidence"],

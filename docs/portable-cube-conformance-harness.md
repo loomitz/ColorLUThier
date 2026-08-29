@@ -26,6 +26,19 @@ The independent red/blue channel-permutation case uses the same public seam:
 python -m portable_cube_harness --descriptor tests/fixtures/red-blue-swap-2/case.json --cube tests/fixtures/red-blue-swap-2/input.cube --output-dir build/red-blue-swap-2
 ```
 
+The interpolation-divergence fixture supplies two complete cases over the same
+Cube and evaluation coordinates:
+
+```console
+python -m portable_cube_harness --descriptor tests/fixtures/interpolation-divergence-2/trilinear.case.json --cube tests/fixtures/interpolation-divergence-2/input.cube --output-dir build/interpolation-divergence-trilinear
+python -m portable_cube_harness --descriptor tests/fixtures/interpolation-divergence-2/tetrahedral.case.json --cube tests/fixtures/interpolation-divergence-2/input.cube --output-dir build/interpolation-divergence-tetrahedral
+```
+
+The descriptor must explicitly select either `trilinear` or `tetrahedral`
+interpolation. The harness never chooses a default. The fixture's static
+expected values and branch-boundary corpus are documented in
+[`DERIVATION.md`](../tests/fixtures/interpolation-divergence-2/DERIVATION.md).
+
 The canonical Cube uses Basic Latin text, LF line endings, red-fastest sample
 ordering, and `.9g` decimal formatting over binary32 table samples. `.9g` means
 up to nine significant decimal digits without insignificant trailing zeroes; it
@@ -44,9 +57,16 @@ Successful evidence is labeled `provisional`, records Host validation as
 Success leaves stderr empty. Validation and internal failures emit a
 machine-readable, provisional error record to stderr.
 
-The umbrella `INPUT_INVALID` code in this first slice is provisional. Stable
-diagnostic codes and acceptance corpora for individual Cube and descriptor
-validation classes remain outside issue #26.
+Interpolation selection has two stable diagnostics:
+
+- `INTERPOLATION_REQUIRED`: the descriptor omits `interpolation`.
+- `INTERPOLATION_UNSUPPORTED`: the descriptor does not select `trilinear` or
+  `tetrahedral`.
+
+Both produce status `2`, empty stdout, a provisional JSON error record on
+stderr, and no output artifacts. The umbrella `INPUT_INVALID` code remains
+provisional for all other invocation, Cube, descriptor, checksum, and output
+validation classes.
 
 ## Run the acceptance test
 

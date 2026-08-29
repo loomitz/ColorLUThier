@@ -52,7 +52,7 @@ def main() -> int:
             output_dir=args.output_dir,
         )
     except HarnessInputError as error:
-        sys.stderr.buffer.write(_error_bytes("INPUT_INVALID", str(error)))
+        sys.stderr.buffer.write(_error_bytes(error.code, str(error)))
         return 2
     except Exception:
         sys.stderr.buffer.write(

@@ -1,0 +1,115 @@
+{
+  "case_id": "interpolation-divergence-2-tetrahedral",
+  "cube": {
+    "sha256": "e53be1a613dc9c9cd149429bb235d2ea70ff632350e1e8f5e37fbad76c735c9e"
+  },
+  "evaluations": [
+    {
+      "expected": [0.75, 0.25, 0.25],
+      "id": "rg-high-boundary",
+      "input": [0.75, 0.75, 0.25]
+    },
+    {
+      "expected": [0.75, 0.25, 0.25],
+      "id": "rg-high-r-side",
+      "input": [0.765625, 0.75, 0.25]
+    },
+    {
+      "expected": [0.734375, 0.25, 0.25],
+      "id": "rg-high-g-side",
+      "input": [0.734375, 0.75, 0.25]
+    },
+    {
+      "expected": [0.25, 0.75, 0.25],
+      "id": "rb-high-boundary",
+      "input": [0.75, 0.25, 0.75]
+    },
+    {
+      "expected": [0.25, 0.75, 0.25],
+      "id": "rb-high-r-side",
+      "input": [0.765625, 0.25, 0.75]
+    },
+    {
+      "expected": [0.25, 0.734375, 0.25],
+      "id": "rb-high-b-side",
+      "input": [0.734375, 0.25, 0.75]
+    },
+    {
+      "expected": [0.25, 0.25, 0.75],
+      "id": "gb-high-boundary",
+      "input": [0.25, 0.75, 0.75]
+    },
+    {
+      "expected": [0.25, 0.25, 0.75],
+      "id": "gb-high-g-side",
+      "input": [0.25, 0.765625, 0.75]
+    },
+    {
+      "expected": [0.25, 0.25, 0.734375],
+      "id": "gb-high-b-side",
+      "input": [0.25, 0.734375, 0.75]
+    },
+    {
+      "expected": [0.25, 0.25, 0.25],
+      "id": "rg-low-boundary",
+      "input": [0.25, 0.25, 0.75]
+    },
+    {
+      "expected": [0.25, 0.265625, 0.25],
+      "id": "rg-low-r-side",
+      "input": [0.265625, 0.25, 0.75]
+    },
+    {
+      "expected": [0.234375, 0.234375, 0.25],
+      "id": "rg-low-g-side",
+      "input": [0.234375, 0.25, 0.75]
+    },
+    {
+      "expected": [0.25, 0.25, 0.25],
+      "id": "rb-low-boundary",
+      "input": [0.25, 0.75, 0.25]
+    },
+    {
+      "expected": [0.265625, 0.25, 0.25],
+      "id": "rb-low-r-side",
+      "input": [0.265625, 0.75, 0.25]
+    },
+    {
+      "expected": [0.234375, 0.234375, 0.25],
+      "id": "rb-low-b-side",
+      "input": [0.234375, 0.75, 0.25]
+    },
+    {
+      "expected": [0.25, 0.25, 0.25],
+      "id": "gb-low-boundary",
+      "input": [0.75, 0.25, 0.25]
+    },
+    {
+      "expected": [0.265625, 0.25, 0.25],
+      "id": "gb-low-g-side",
+      "input": [0.75, 0.265625, 0.25]
+    },
+    {
+      "expected": [0.234375, 0.25, 0.234375],
+      "id": "gb-low-b-side",
+      "input": [0.75, 0.234375, 0.25]
+    },
+    {
+      "expected": [0.5, 0.5, 0.5],
+      "id": "all-equal-center",
+      "input": [0.5, 0.5, 0.5]
+    }
+  ],
+  "gates": {
+    "maximum_absolute_error": 9.5367431640625e-07,
+    "require_finite_outputs": true,
+    "require_node_binary32_identity": true,
+    "require_serialization_binary32_identity": true
+  },
+  "interpolation": "tetrahedral",
+  "oracle": {
+    "kind": "explicit_expected_values",
+    "provenance": "Independently derived pairwise-minimum values documented in DERIVATION.md; the harness evaluator was not used."
+  },
+  "test_case_schema_version": 1
+}

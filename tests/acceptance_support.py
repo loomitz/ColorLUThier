@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -33,7 +34,11 @@ class SuccessfulConformanceRun:
 
 
 def run_harness(
-    *, descriptor: Path, cube: Path, output_directory: Path
+    *,
+    descriptor: Path,
+    cube: Path,
+    output_directory: Path,
+    environment: Mapping[str, str] | None = None,
 ) -> subprocess.CompletedProcess[bytes]:
     return subprocess.run(
         [
@@ -50,7 +55,131 @@ def run_harness(
         cwd=REPOSITORY_ROOT,
         check=False,
         capture_output=True,
+        env=environment,
     )
+
+
+def deterministic_json_bytes(value: object) -> bytes:
+    return (
+        json.dumps(
+            value,
+            allow_nan=False,
+            ensure_ascii=True,
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
+    ).encode("ascii")
+
+
+def assert_deterministic_invalid_command(
+    test: unittest.TestCase,
+    *,
+    expected_code: str,
+    descriptor: Path | None = None,
+    descriptor_bytes: bytes | None = None,
+    cube: Path | None = None,
+    cube_bytes: bytes | None = None,
+    expected_reason: str | None = None,
+    expected_context: dict[str, object] | None = None,
+    prepare_output: Callable[[Path], None] | None = None,
+    assert_output: Callable[[unittest.TestCase, Path], None] | None = None,
+) -> dict[str, Any]:
+    if (descriptor is None) == (descriptor_bytes is None):
+        raise ValueError("Provide exactly one descriptor path or descriptor byte string")
+    if (cube is None) == (cube_bytes is None):
+        raise ValueError("Provide exactly one Cube path or Cube byte string")
+
+    results: list[subprocess.CompletedProcess[bytes]] = []
+    output_directories: list[Path] = []
+    temporary_roots: list[Path] = []
+    with (
+        tempfile.TemporaryDirectory() as first_temp,
+        tempfile.TemporaryDirectory() as second_temp,
+    ):
+        for run_index, temporary_path in enumerate((first_temp, second_temp)):
+            temporary_root = Path(temporary_path)
+            descriptor_path = descriptor
+            if descriptor_bytes is not None:
+                descriptor_path = temporary_root / f"descriptor-{run_index}.case.json"
+                descriptor_path.write_bytes(descriptor_bytes)
+            cube_path = cube
+            if cube_bytes is not None:
+                cube_path = temporary_root / f"input-{run_index}.cube"
+                cube_path.write_bytes(cube_bytes)
+            if descriptor_path is None or cube_path is None:
+                raise AssertionError("Invalid-command fixture materialization failed")
+
+            output_directory = temporary_root / f"artifacts-{run_index}"
+            if prepare_output is not None:
+                prepare_output(output_directory)
+            else:
+                test.assertFalse(output_directory.exists())
+
+            results.append(
+                run_harness(
+                    descriptor=descriptor_path,
+                    cube=cube_path,
+                    output_directory=output_directory,
+                )
+            )
+            output_directories.append(output_directory)
+            temporary_roots.append(temporary_root)
+
+        payloads: list[dict[str, Any]] = []
+        for result, output_directory, temporary_root in zip(
+            results,
+            output_directories,
+            temporary_roots,
+            strict=True,
+        ):
+            test.assertEqual(result.returncode, 2)
+            test.assertEqual(result.stdout, b"")
+            if assert_output is None:
+                test.assertFalse(output_directory.exists())
+                test.assertFalse((output_directory / "canonical.cube").exists())
+                test.assertFalse((output_directory / "report.json").exists())
+            else:
+                assert_output(test, output_directory)
+
+            stderr_text = result.stderr.decode("ascii")
+            test.assertNotIn(str(temporary_root), stderr_text)
+            test.assertNotIn("Traceback", stderr_text)
+            test.assertLessEqual(len(result.stderr), 4096)
+
+            payload: dict[str, Any] = json.loads(result.stderr)
+            test.assertEqual(
+                set(payload),
+                {"error", "evidence_status", "report_schema_version"},
+            )
+            test.assertEqual(payload["evidence_status"], "provisional")
+            test.assertEqual(payload["report_schema_version"], 1)
+
+            error = payload["error"]
+            test.assertIsInstance(error, dict)
+            test.assertEqual(error["code"], expected_code)
+            test.assertIsInstance(error["message"], str)
+            test.assertTrue(error["message"])
+            test.assertLessEqual(len(error["message"]), 512)
+            error["message"].encode("ascii")
+            if expected_reason is not None or expected_context is not None:
+                test.assertEqual(
+                    set(error), {"code", "context", "message", "reason"}
+                )
+                test.assertEqual(error["reason"], expected_reason)
+                test.assertEqual(error["context"], expected_context)
+            else:
+                if "reason" in error:
+                    test.assertIsInstance(error["reason"], str)
+                    test.assertTrue(error["reason"])
+                if "context" in error:
+                    test.assertIsInstance(error["context"], dict)
+            test.assertEqual(result.stderr, deterministic_json_bytes(payload))
+            payloads.append(payload)
+
+        test.assertEqual(results[0].stderr, results[1].stderr)
+        test.assertEqual(payloads[0], payloads[1])
+        return payloads[0]
 
 
 def cube_sample_bits(cube_bytes: bytes) -> list[tuple[bytes, bytes, bytes]]:
@@ -127,7 +256,7 @@ def assert_deterministic_success(
 
         report = json.loads(first_report)
         test.assertEqual(report["report_schema_version"], 1)
-        test.assertEqual(report["harness_version"], "0.4.0")
+        test.assertEqual(report["harness_version"], "0.5.0")
         test.assertEqual(report["overall_result"], "pass")
         test.assertEqual(
             report["evidence"],

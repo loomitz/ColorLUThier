@@ -20,6 +20,33 @@ interchange manifest. The command writes `canonical.cube` and `report.json` in
 the requested output directory. On a completed conformance run, stdout is
 byte-identical to `report.json`.
 
+## Internal test descriptor
+
+Descriptor schema version `1` is a closed, test-only metadata shape. It may
+evolve with this provisional oracle and has no compatibility or migration
+relationship with a future ColorLUThier interchange manifest. Its root object
+contains exactly these fields:
+
+- `test_case_schema_version`: the integer `1`;
+- `case_id`: a lowercase, hyphen-separated stable identifier;
+- `cube`: an object containing only the lowercase `sha256` digest;
+- `interpolation`: `trilinear` or `tetrahedral`;
+- `oracle`: an object whose `kind` is `explicit_expected_values` and whose
+  non-empty `provenance` identifies the independent derivation;
+- `evaluations`: a non-empty array of closed objects containing a unique stable
+  `id`, a three-component `input`, and a three-component finite `expected`
+  result; and
+- `gates`: a closed object containing the finite, non-negative
+  `maximum_absolute_error` plus boolean `require_finite_outputs`,
+  `require_node_binary32_identity`, and
+  `require_serialization_binary32_identity` fields.
+
+Unknown members are rejected at every object level. In particular, the
+descriptor cannot declare a custom domain, clamping, extrapolation, range, or
+shaper policy. Every evaluation input component must be finite and inside the
+closed implicit Portable Cube domain `[0,1]`. A request outside that domain is
+invalid; it is never clamped or extrapolated.
+
 The independent red/blue channel-permutation case uses the same public seam:
 
 ```console
@@ -108,6 +135,11 @@ copies the report bytes to stdout. A status `1` report has a successful input
 validation result and an `overall_result` of `fail`. Validation and internal
 failures emit a machine-readable, provisional error record to stderr.
 
+The two successful artifacts are staged before publication. If output
+publication fails, the command exits `2`, emits no successful report, removes
+any newly published final artifact, and makes a best-effort rollback to preserve
+pre-existing `canonical.cube` and `report.json` files.
+
 Interpolation selection has two stable diagnostics:
 
 - `INTERPOLATION_REQUIRED`: the descriptor omits `interpolation`.
@@ -116,6 +148,26 @@ Interpolation selection has two stable diagnostics:
 
 Both produce status `2`, empty stdout, a provisional JSON error record on
 stderr, and no output artifacts.
+
+Internal descriptor and evaluation validation has six additional stable
+top-level diagnostics:
+
+- `DESCRIPTOR_ENCODING_INVALID`: the descriptor is not valid UTF-8;
+- `DESCRIPTOR_JSON_INVALID`: its JSON text is malformed, ambiguous, too deeply
+  nested, or contains a numeric token that cannot be parsed safely;
+- `DESCRIPTOR_SCHEMA_UNSUPPORTED`: its integer schema version is not supported;
+- `DESCRIPTOR_SCHEMA_INVALID`: its closed shape, required fields, field types,
+  identifiers, oracle metadata, expected values, or gates are invalid;
+- `CUBE_CHECKSUM_MISMATCH`: the supplied Cube bytes do not match the descriptor
+  SHA-256 digest; and
+- `EVALUATION_INPUT_INVALID`: an evaluation input has the wrong shape, contains
+  a non-finite value, or lies outside `[0,1]`.
+
+These failures exit `2`, leave stdout empty, emit a deterministic provisional
+JSON error record on stderr, and write no new `canonical.cube` or `report.json`
+artifact. The stable `code` is the classifier. Deterministic `reason`,
+`context`, and `message` fields provide bounded factual detail without absolute
+paths, timestamps, or descriptor payloads; callers must not branch on them.
 
 Cube artifact validation has four stable top-level diagnostics:
 
@@ -148,9 +200,15 @@ and non-ASCII input are rejected rather than normalized.
 
 The `2...65` lattice-size bound is checked before allocating or waiting for the
 declared sample table. The umbrella `INPUT_INVALID` code remains provisional for
-other invocation, descriptor, checksum, file-access, and output validation
-classes. Descriptor metadata, evaluation-domain validation, and unexpected
-internal failures are outside the Cube diagnostic taxonomy.
+other invocation, file-access, and output validation classes. Descriptor
+metadata, evaluation-domain validation, and unexpected internal failures are
+outside the Cube diagnostic taxonomy.
+
+An unexpected implementation failure exits `3`, leaves stdout empty, and emits
+the stable top-level code `INTERNAL_ERROR` with a fixed message. It does not
+expose exception text or other implementation details. This status is distinct
+from every expected invocation, descriptor, Cube, checksum, and output
+validation failure.
 
 ## Run the acceptance test
 

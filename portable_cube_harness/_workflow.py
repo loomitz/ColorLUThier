@@ -5,8 +5,11 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import re
+import stat
 import struct
+import tempfile
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from fractions import Fraction
@@ -14,7 +17,7 @@ from pathlib import Path
 from typing import Any, cast
 
 
-HARNESS_VERSION = "0.4.0"
+HARNESS_VERSION = "0.5.0"
 REPORT_SCHEMA_VERSION = 1
 TEST_CASE_SCHEMA_VERSION = 1
 
@@ -33,6 +36,26 @@ _UNSUPPORTED_CUBE_DIRECTIVES = {
     "TITLE",
 }
 _UNKNOWN_HEADER_PREVIEW_LENGTH = 64
+_UNKNOWN_DESCRIPTOR_FIELD_PREVIEW_LENGTH = 64
+
+_ROOT_DESCRIPTOR_FIELDS = {
+    "case_id",
+    "cube",
+    "evaluations",
+    "gates",
+    "interpolation",
+    "oracle",
+    "test_case_schema_version",
+}
+_CUBE_METADATA_FIELDS = {"sha256"}
+_ORACLE_METADATA_FIELDS = {"kind", "provenance"}
+_EVALUATION_FIELDS = {"expected", "id", "input"}
+_GATE_FIELDS = {
+    "maximum_absolute_error",
+    "require_finite_outputs",
+    "require_node_binary32_identity",
+    "require_serialization_binary32_identity",
+}
 
 RGB = tuple[float, float, float]
 Binary32RGB = tuple[int, int, int]
@@ -70,6 +93,11 @@ class _CubeParseFailure(ValueError):
         self.code = code
         self.reason = reason
         self.context = context
+
+
+@dataclass(frozen=True)
+class _NonFiniteJSONNumber:
+    token: str
 
 
 @dataclass(frozen=True)
@@ -131,40 +159,154 @@ def _read_bytes(path: Path, artifact_name: str) -> bytes:
         raise HarnessInputError(f"The {artifact_name} could not be read.") from error
 
 
-def _reject_json_constant(value: str) -> None:
-    raise HarnessInputError(f"The test descriptor contains invalid number {value!r}.")
+def _json_constant(value: str) -> _NonFiniteJSONNumber:
+    return _NonFiniteJSONNumber(value)
 
 
-def _mapping(value: Any, field: str) -> dict[str, Any]:
-    if not isinstance(value, dict):
-        raise HarnessInputError(f"Descriptor field {field!r} must be an object.")
-    return value
+def _bounded_member_context(member: str) -> dict[str, object]:
+    return {
+        "member_length": len(member),
+        "member_prefix": member[:_UNKNOWN_DESCRIPTOR_FIELD_PREVIEW_LENGTH],
+    }
 
 
-def _required(mapping: dict[str, Any], field: str) -> Any:
-    if field not in mapping:
-        raise HarnessInputError(f"Descriptor field {field!r} is required.")
-    return mapping[field]
-
-
-def _finite_number(value: Any, field: str) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise HarnessInputError(f"Descriptor field {field!r} must be a number.")
-    result = float(value)
-    if not math.isfinite(result):
-        raise HarnessInputError(f"Descriptor field {field!r} must be finite.")
+def _json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for member, value in pairs:
+        if member in result:
+            raise HarnessInputError(
+                "The test descriptor contains a duplicate JSON object member.",
+                code="DESCRIPTOR_JSON_INVALID",
+                reason="duplicate_object_member",
+                context=_bounded_member_context(member),
+            )
+        result[member] = value
     return result
 
 
-def _rgb_vector(value: Any, field: str, *, require_unit_domain: bool) -> RGB:
+def _mapping(
+    value: Any,
+    field: str,
+) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise HarnessInputError(
+            f"Descriptor field {field!r} must be an object.",
+            code="DESCRIPTOR_SCHEMA_INVALID",
+            reason="object_required",
+            context={"field": field},
+        )
+    return value
+
+
+def _closed_mapping(
+    value: Any,
+    field: str,
+    allowed_fields: set[str],
+) -> dict[str, Any]:
+    mapping = _mapping(value, field)
+    unexpected_fields = sorted(set(mapping) - allowed_fields)
+    if unexpected_fields:
+        member = unexpected_fields[0]
+        raise HarnessInputError(
+            f"Descriptor field {field!r} contains an unsupported member.",
+            code="DESCRIPTOR_SCHEMA_INVALID",
+            reason="unsupported_object_member",
+            context={"field": field, **_bounded_member_context(member)},
+        )
+    return mapping
+
+
+def _required(
+    mapping: dict[str, Any],
+    field: str,
+    *,
+    parent: str | None = None,
+    code: str = "DESCRIPTOR_SCHEMA_INVALID",
+) -> Any:
+    if field not in mapping:
+        qualified_field = field if parent is None else f"{parent}.{field}"
+        raise HarnessInputError(
+            f"Descriptor field {qualified_field!r} is required.",
+            code=code,
+            reason="required_field_missing",
+            context={"field": qualified_field},
+        )
+    return mapping[field]
+
+
+def _finite_number(
+    value: Any,
+    field: str,
+    *,
+    code: str = "DESCRIPTOR_SCHEMA_INVALID",
+) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        reason = (
+            "non_finite_number"
+            if isinstance(value, _NonFiniteJSONNumber)
+            else "number_required"
+        )
+        raise HarnessInputError(
+            f"Descriptor field {field!r} must be a finite number.",
+            code=code,
+            reason=reason,
+            context={"field": field},
+        )
+    try:
+        result = float(value)
+    except (OverflowError, ValueError) as error:
+        raise HarnessInputError(
+            f"Descriptor field {field!r} must be a finite number.",
+            code=code,
+            reason="non_finite_number",
+            context={"field": field},
+        ) from error
+    if not math.isfinite(result):
+        raise HarnessInputError(
+            f"Descriptor field {field!r} must be a finite number.",
+            code=code,
+            reason="non_finite_number",
+            context={"field": field},
+        )
+    return result
+
+
+def _rgb_vector(
+    value: Any,
+    field: str,
+    *,
+    code: str,
+    require_unit_domain: bool,
+) -> RGB:
     if not isinstance(value, list) or len(value) != 3:
-        raise HarnessInputError(f"Descriptor field {field!r} must contain three numbers.")
+        raise HarnessInputError(
+            f"Descriptor field {field!r} must contain three finite numbers.",
+            code=code,
+            reason="rgb_vector_required",
+            context={"field": field},
+        )
     result = tuple(
-        _finite_number(component, f"{field}[{index}]")
+        _finite_number(component, f"{field}[{index}]", code=code)
         for index, component in enumerate(value)
     )
-    if require_unit_domain and any(component < 0.0 or component > 1.0 for component in result):
-        raise HarnessInputError(f"Descriptor field {field!r} must be inside [0,1].")
+    if require_unit_domain and any(
+        component < 0.0 or component > 1.0 for component in result
+    ):
+        component = next(
+            index
+            for index, value_component in enumerate(result)
+            if value_component < 0.0 or value_component > 1.0
+        )
+        raise HarnessInputError(
+            f"Descriptor field {field!r} must be inside [0,1].",
+            code=code,
+            reason="outside_unit_domain",
+            context={
+                "field": f"{field}[{component}]",
+                "maximum": 1.0,
+                "minimum": 0.0,
+            },
+        )
     return cast(RGB, result)
 
 
@@ -172,27 +314,92 @@ def _load_test_case(raw: bytes) -> TestCase:
     try:
         decoded = raw.decode("utf-8")
     except UnicodeDecodeError as error:
-        raise HarnessInputError("The test descriptor must be UTF-8 JSON.") from error
+        raise HarnessInputError(
+            "The test descriptor must use valid UTF-8.",
+            code="DESCRIPTOR_ENCODING_INVALID",
+            reason="invalid_utf8",
+            context={
+                "byte_offset": error.start,
+                "byte_value": raw[error.start],
+            },
+        ) from error
 
     try:
-        parsed = json.loads(decoded, parse_constant=_reject_json_constant)
+        parsed = json.loads(
+            decoded,
+            object_pairs_hook=_json_object,
+            parse_constant=_json_constant,
+        )
     except HarnessInputError:
         raise
-    except (json.JSONDecodeError, RecursionError) as error:
-        raise HarnessInputError("The test descriptor is not valid JSON.") from error
+    except json.JSONDecodeError as error:
+        raise HarnessInputError(
+            "The test descriptor is not valid JSON.",
+            code="DESCRIPTOR_JSON_INVALID",
+            reason="malformed_json",
+            context={"column": error.colno, "line": error.lineno},
+        ) from error
+    except RecursionError as error:
+        raise HarnessInputError(
+            "The test descriptor exceeds the supported JSON nesting depth.",
+            code="DESCRIPTOR_JSON_INVALID",
+            reason="nesting_too_deep",
+            context={"document": "test_descriptor"},
+        ) from error
+    except ValueError as error:
+        raise HarnessInputError(
+            "The test descriptor contains a JSON number that is too large "
+            "to parse safely.",
+            code="DESCRIPTOR_JSON_INVALID",
+            reason="numeric_token_too_large",
+            context={"document": "test_descriptor"},
+        ) from error
 
-    root = _mapping(parsed, "<root>")
-    if _required(root, "test_case_schema_version") != TEST_CASE_SCHEMA_VERSION:
-        raise HarnessInputError("The test descriptor schema version is unsupported.")
+    root = _closed_mapping(parsed, "<root>", _ROOT_DESCRIPTOR_FIELDS)
+    schema_version = _required(root, "test_case_schema_version")
+    if type(schema_version) is not int:
+        raise HarnessInputError(
+            "Descriptor field 'test_case_schema_version' must be an integer.",
+            code="DESCRIPTOR_SCHEMA_INVALID",
+            reason="integer_required",
+            context={"field": "test_case_schema_version"},
+        )
+    if schema_version != TEST_CASE_SCHEMA_VERSION:
+        raise HarnessInputError(
+            "The test descriptor schema version is unsupported.",
+            code="DESCRIPTOR_SCHEMA_UNSUPPORTED",
+            reason="unsupported_schema_version",
+            context={"supported_version": TEST_CASE_SCHEMA_VERSION},
+        )
 
     case_id = _required(root, "case_id")
-    if not isinstance(case_id, str) or _STABLE_IDENTIFIER.fullmatch(case_id) is None:
-        raise HarnessInputError("Descriptor field 'case_id' is invalid.")
+    if (
+        not isinstance(case_id, str)
+        or _STABLE_IDENTIFIER.fullmatch(case_id) is None
+    ):
+        raise HarnessInputError(
+            "Descriptor field 'case_id' must be a stable lowercase identifier.",
+            code="DESCRIPTOR_SCHEMA_INVALID",
+            reason="stable_identifier_required",
+            context={"field": "case_id"},
+        )
 
-    cube_metadata = _mapping(_required(root, "cube"), "cube")
-    cube_sha256 = _required(cube_metadata, "sha256")
-    if not isinstance(cube_sha256, str) or _HEX_SHA256.fullmatch(cube_sha256) is None:
-        raise HarnessInputError("Descriptor field 'cube.sha256' is invalid.")
+    cube_metadata = _closed_mapping(
+        _required(root, "cube"),
+        "cube",
+        _CUBE_METADATA_FIELDS,
+    )
+    cube_sha256 = _required(cube_metadata, "sha256", parent="cube")
+    if (
+        not isinstance(cube_sha256, str)
+        or _HEX_SHA256.fullmatch(cube_sha256) is None
+    ):
+        raise HarnessInputError(
+            "Descriptor field 'cube.sha256' must be a lowercase SHA-256 digest.",
+            code="DESCRIPTOR_SCHEMA_INVALID",
+            reason="sha256_required",
+            context={"field": "cube.sha256"},
+        )
 
     if "interpolation" not in root:
         raise HarnessInputError(
@@ -210,50 +417,100 @@ def _load_test_case(raw: bytes) -> TestCase:
             code="INTERPOLATION_UNSUPPORTED",
         )
 
-    oracle = _mapping(_required(root, "oracle"), "oracle")
-    if _required(oracle, "kind") != "explicit_expected_values":
-        raise HarnessInputError("The identity case requires explicit independent expected values.")
-    provenance = _required(oracle, "provenance")
+    oracle = _closed_mapping(
+        _required(root, "oracle"),
+        "oracle",
+        _ORACLE_METADATA_FIELDS,
+    )
+    if _required(oracle, "kind", parent="oracle") != "explicit_expected_values":
+        raise HarnessInputError(
+            "Descriptor field 'oracle.kind' is unsupported.",
+            code="DESCRIPTOR_SCHEMA_INVALID",
+            reason="unsupported_oracle_kind",
+            context={"field": "oracle.kind"},
+        )
+    provenance = _required(oracle, "provenance", parent="oracle")
     if not isinstance(provenance, str) or not provenance.strip():
-        raise HarnessInputError("Descriptor field 'oracle.provenance' is invalid.")
+        raise HarnessInputError(
+            "Descriptor field 'oracle.provenance' must be a non-empty string.",
+            code="DESCRIPTOR_SCHEMA_INVALID",
+            reason="non_empty_string_required",
+            context={"field": "oracle.provenance"},
+        )
 
     raw_evaluations = _required(root, "evaluations")
     if not isinstance(raw_evaluations, list) or not raw_evaluations:
-        raise HarnessInputError("Descriptor field 'evaluations' must be a non-empty array.")
+        raise HarnessInputError(
+            "Descriptor field 'evaluations' must be a non-empty array.",
+            code="DESCRIPTOR_SCHEMA_INVALID",
+            reason="non_empty_array_required",
+            context={"field": "evaluations"},
+        )
 
     evaluations: list[Evaluation] = []
     identifiers: set[str] = set()
     for index, raw_evaluation in enumerate(raw_evaluations):
-        item = _mapping(raw_evaluation, f"evaluations[{index}]")
-        identifier = _required(item, "id")
-        if not isinstance(identifier, str) or _STABLE_IDENTIFIER.fullmatch(identifier) is None:
-            raise HarnessInputError(f"Descriptor field 'evaluations[{index}].id' is invalid.")
+        field = f"evaluations[{index}]"
+        item = _closed_mapping(raw_evaluation, field, _EVALUATION_FIELDS)
+        identifier = _required(item, "id", parent=field)
+        if (
+            not isinstance(identifier, str)
+            or _STABLE_IDENTIFIER.fullmatch(identifier) is None
+        ):
+            raise HarnessInputError(
+                f"Descriptor field '{field}.id' must be a stable lowercase "
+                "identifier.",
+                code="DESCRIPTOR_SCHEMA_INVALID",
+                reason="stable_identifier_required",
+                context={"field": f"{field}.id"},
+            )
         if identifier in identifiers:
-            raise HarnessInputError("Evaluation identifiers must be unique.")
+            raise HarnessInputError(
+                "Descriptor evaluation identifiers must be unique.",
+                code="DESCRIPTOR_SCHEMA_INVALID",
+                reason="duplicate_evaluation_identifier",
+                context={"field": f"{field}.id"},
+            )
         identifiers.add(identifier)
         evaluations.append(
             Evaluation(
                 identifier=identifier,
                 input_rgb=_rgb_vector(
-                    _required(item, "input"),
-                    f"evaluations[{index}].input",
+                    _required(
+                        item,
+                        "input",
+                        parent=field,
+                        code="EVALUATION_INPUT_INVALID",
+                    ),
+                    f"{field}.input",
+                    code="EVALUATION_INPUT_INVALID",
                     require_unit_domain=True,
                 ),
                 expected_rgb=_rgb_vector(
-                    _required(item, "expected"),
-                    f"evaluations[{index}].expected",
+                    _required(item, "expected", parent=field),
+                    f"{field}.expected",
+                    code="DESCRIPTOR_SCHEMA_INVALID",
                     require_unit_domain=False,
                 ),
             )
         )
 
-    gates = _mapping(_required(root, "gates"), "gates")
+    gates = _closed_mapping(
+        _required(root, "gates"),
+        "gates",
+        _GATE_FIELDS,
+    )
     maximum_absolute_error = _finite_number(
-        _required(gates, "maximum_absolute_error"),
+        _required(gates, "maximum_absolute_error", parent="gates"),
         "gates.maximum_absolute_error",
     )
     if maximum_absolute_error < 0.0:
-        raise HarnessInputError("The maximum absolute error gate cannot be negative.")
+        raise HarnessInputError(
+            "Descriptor field 'gates.maximum_absolute_error' cannot be negative.",
+            code="DESCRIPTOR_SCHEMA_INVALID",
+            reason="negative_gate_threshold",
+            context={"field": "gates.maximum_absolute_error"},
+        )
 
     required_boolean_gates = (
         "require_finite_outputs",
@@ -262,9 +519,14 @@ def _load_test_case(raw: bytes) -> TestCase:
     )
     boolean_gates: dict[str, bool] = {}
     for field in required_boolean_gates:
-        value = _required(gates, field)
+        value = _required(gates, field, parent="gates")
         if not isinstance(value, bool):
-            raise HarnessInputError(f"Descriptor field 'gates.{field}' must be boolean.")
+            raise HarnessInputError(
+                f"Descriptor field 'gates.{field}' must be boolean.",
+                code="DESCRIPTOR_SCHEMA_INVALID",
+                reason="boolean_required",
+                context={"field": f"gates.{field}"},
+            )
         boolean_gates[field] = value
 
     return TestCase(
@@ -1017,11 +1279,76 @@ def _deterministic_json_bytes(value: object) -> bytes:
     return (text + "\n").encode("ascii")
 
 
+def _rollback_outputs(
+    artifacts: tuple[tuple[Path, Path], ...],
+    published: set[Path],
+) -> None:
+    for final_path, backup_path in reversed(artifacts):
+        try:
+            if os.path.lexists(backup_path):
+                os.replace(backup_path, final_path)
+            elif final_path in published:
+                final_path.unlink(missing_ok=True)
+        except OSError:
+            # The original output error remains authoritative. Rollback is
+            # deliberately best-effort so cleanup cannot leak filesystem paths.
+            pass
+
+
 def _write_outputs(output_dir: Path, canonical_cube: bytes, report: bytes) -> None:
     try:
         output_dir.mkdir(parents=True, exist_ok=True)
-        (output_dir / "canonical.cube").write_bytes(canonical_cube)
-        (output_dir / "report.json").write_bytes(report)
+        final_artifacts = (
+            (output_dir / "canonical.cube", canonical_cube),
+            (output_dir / "report.json", report),
+        )
+        existing_artifacts: set[Path] = set()
+        for final_path, _ in final_artifacts:
+            try:
+                mode = final_path.lstat().st_mode
+            except FileNotFoundError:
+                continue
+            if not stat.S_ISREG(mode):
+                raise HarnessInputError(
+                    "The output artifacts could not be written."
+                )
+            existing_artifacts.add(final_path)
+
+        with tempfile.TemporaryDirectory(
+            dir=output_dir,
+            ignore_cleanup_errors=True,
+            prefix=".portable-cube-harness-",
+        ) as staging_directory_text:
+            staging_directory = Path(staging_directory_text)
+            staged_artifacts = tuple(
+                (
+                    final_path,
+                    staging_directory / f"{final_path.name}.next",
+                    staging_directory / f"{final_path.name}.previous",
+                    artifact_bytes,
+                )
+                for final_path, artifact_bytes in final_artifacts
+            )
+            for _, staged_path, _, artifact_bytes in staged_artifacts:
+                staged_path.write_bytes(artifact_bytes)
+
+            rollback_artifacts = tuple(
+                (final_path, backup_path)
+                for final_path, _, backup_path, _ in staged_artifacts
+            )
+            published: set[Path] = set()
+            try:
+                for final_path, _, backup_path, _ in staged_artifacts:
+                    if final_path in existing_artifacts:
+                        os.replace(final_path, backup_path)
+                for final_path, staged_path, _, _ in staged_artifacts:
+                    os.replace(staged_path, final_path)
+                    published.add(final_path)
+            except Exception:
+                _rollback_outputs(rollback_artifacts, published)
+                raise
+    except HarnessInputError:
+        raise
     except OSError as error:
         raise HarnessInputError("The output artifacts could not be written.") from error
 
@@ -1033,7 +1360,15 @@ def run_case(
     input_cube_bytes = _read_bytes(cube_path, "Cube artifact")
     input_cube_sha256 = hashlib.sha256(input_cube_bytes).hexdigest()
     if input_cube_sha256 != descriptor.cube_sha256:
-        raise HarnessInputError("The Cube artifact does not match its descriptor checksum.")
+        raise HarnessInputError(
+            "The Cube artifact does not match its descriptor checksum.",
+            code="CUBE_CHECKSUM_MISMATCH",
+            reason="sha256_mismatch",
+            context={
+                "actual_sha256": input_cube_sha256,
+                "expected_sha256": descriptor.cube_sha256,
+            },
+        )
 
     try:
         input_cube = _parse_cube(input_cube_bytes)

@@ -6,9 +6,13 @@ import tempfile
 import unittest
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
-from acceptance_support import REPOSITORY_ROOT, run_harness
+from acceptance_support import (
+    REPOSITORY_ROOT,
+    assert_deterministic_invalid_command,
+    deterministic_json_bytes,
+    run_harness,
+)
 
 
 IDENTITY_FIXTURE_DIRECTORY = REPOSITORY_ROOT / "tests" / "fixtures" / "identity-2"
@@ -34,19 +38,6 @@ class InvalidCubeCase:
     context: dict[str, object]
 
 
-def _json_bytes(value: object) -> bytes:
-    return (
-        json.dumps(
-            value,
-            allow_nan=False,
-            ensure_ascii=True,
-            indent=2,
-            sort_keys=True,
-        )
-        + "\n"
-    ).encode("ascii")
-
-
 def _cube_bytes(*lines: str) -> bytes:
     return ("\n".join(lines) + "\n").encode("ascii")
 
@@ -63,7 +54,7 @@ def _identity_cube_with_first_row(first_row: str) -> bytes:
 def _descriptor_bytes_for(cube_bytes: bytes) -> bytes:
     descriptor = json.loads(IDENTITY_DESCRIPTOR_PATH.read_text(encoding="utf-8"))
     descriptor["cube"]["sha256"] = hashlib.sha256(cube_bytes).hexdigest()
-    return _json_bytes(descriptor)
+    return deterministic_json_bytes(descriptor)
 
 
 class CubeDiagnosticsAcceptanceTest(unittest.TestCase):
@@ -484,54 +475,14 @@ class CubeDiagnosticsAcceptanceTest(unittest.TestCase):
 
         for case in cases:
             with self.subTest(case=case.name):
-                with tempfile.TemporaryDirectory() as temp:
-                    temporary_directory = Path(temp)
-                    cube_path = temporary_directory / f"{case.name}.cube"
-                    descriptor_path = temporary_directory / f"{case.name}.case.json"
-                    cube_path.write_bytes(case.cube_bytes)
-                    descriptor_path.write_bytes(_descriptor_bytes_for(case.cube_bytes))
-
-                    first_output = temporary_directory / "first-artifacts"
-                    second_output = temporary_directory / "second-artifacts"
-                    first = run_harness(
-                        descriptor=descriptor_path,
-                        cube=cube_path,
-                        output_directory=first_output,
-                    )
-                    second = run_harness(
-                        descriptor=descriptor_path,
-                        cube=cube_path,
-                        output_directory=second_output,
-                    )
-
-                    self.assertEqual(first.returncode, 2)
-                    self.assertEqual(second.returncode, 2)
-                    self.assertEqual(first.stdout, b"")
-                    self.assertEqual(second.stdout, b"")
-                    self.assertEqual(first.stderr, second.stderr)
-                    self.assertFalse(first_output.exists())
-                    self.assertFalse(second_output.exists())
-
-                    payload: dict[str, Any] = json.loads(first.stderr)
-                    self.assertEqual(
-                        set(payload),
-                        {"error", "evidence_status", "report_schema_version"},
-                    )
-                    self.assertEqual(payload["evidence_status"], "provisional")
-                    self.assertEqual(payload["report_schema_version"], 1)
-
-                    error = payload["error"]
-                    self.assertEqual(
-                        set(error), {"code", "context", "message", "reason"}
-                    )
-                    self.assertEqual(error["code"], case.code)
-                    self.assertEqual(error["reason"], case.reason)
-                    self.assertEqual(error["context"], case.context)
-                    self.assertIsInstance(error["message"], str)
-                    self.assertTrue(error["message"])
-                    self.assertLessEqual(len(error["message"]), 512)
-                    error["message"].encode("ascii")
-                    self.assertEqual(first.stderr, _json_bytes(payload))
+                assert_deterministic_invalid_command(
+                    self,
+                    descriptor_bytes=_descriptor_bytes_for(case.cube_bytes),
+                    cube_bytes=case.cube_bytes,
+                    expected_code=case.code,
+                    expected_reason=case.reason,
+                    expected_context=case.context,
+                )
 
     def test_leading_blank_lines_and_comments_remain_valid(self) -> None:
         cube_bytes = _cube_bytes(

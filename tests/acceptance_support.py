@@ -3,6 +3,9 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
+import re
+import socket
 import struct
 import subprocess
 import sys
@@ -15,12 +18,25 @@ from typing import Any
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+HARNESS_VERSION = "0.6.0"
+PROVISIONAL_EVIDENCE = {
+    "compatibility_claims": [],
+    "host_validation": "not_performed",
+    "status": "provisional",
+}
 METRIC_FIELDS = {
     "maximum_absolute_error",
     "maximum_clf_normalized_error",
     "mean_absolute_error",
     "p99_absolute_error",
 }
+TIMESTAMP_PATTERN = re.compile(
+    r"\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}"
+)
+UUID_PATTERN = re.compile(
+    r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-"
+    r"[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}\b"
+)
 
 
 @dataclass(frozen=True)
@@ -59,6 +75,25 @@ def run_harness(
     )
 
 
+def run_corpus_materializer(
+    *,
+    output_directory: Path,
+    environment: Mapping[str, str] | None = None,
+) -> subprocess.CompletedProcess[bytes]:
+    return subprocess.run(
+        [
+            sys.executable,
+            str(REPOSITORY_ROOT / "tests" / "materialize_portable_cube_corpus.py"),
+            "--output-dir",
+            str(output_directory),
+        ],
+        cwd=REPOSITORY_ROOT,
+        check=False,
+        capture_output=True,
+        env=environment,
+    )
+
+
 def deterministic_json_bytes(value: object) -> bytes:
     return (
         json.dumps(
@@ -70,6 +105,16 @@ def deterministic_json_bytes(value: object) -> bytes:
         )
         + "\n"
     ).encode("ascii")
+
+
+def assert_deterministic_json_document(
+    test: unittest.TestCase,
+    raw: bytes,
+) -> dict[str, Any]:
+    document: dict[str, Any] = json.loads(raw)
+    test.assertIsInstance(document, dict)
+    test.assertEqual(raw, deterministic_json_bytes(document))
+    return document
 
 
 def assert_deterministic_invalid_command(
@@ -116,11 +161,15 @@ def assert_deterministic_invalid_command(
             else:
                 test.assertFalse(output_directory.exists())
 
+            environment = os.environ.copy()
+            environment["PYTHONHASHSEED"] = str(101 + run_index * 808)
+            environment["PYTHONDONTWRITEBYTECODE"] = "1"
             results.append(
                 run_harness(
                     descriptor=descriptor_path,
                     cube=cube_path,
                     output_directory=output_directory,
+                    environment=environment,
                 )
             )
             output_directories.append(output_directory)
@@ -144,10 +193,14 @@ def assert_deterministic_invalid_command(
 
             stderr_text = result.stderr.decode("ascii")
             test.assertNotIn(str(temporary_root), stderr_text)
+            test.assertNotIn(str(REPOSITORY_ROOT), stderr_text)
+            test.assertNotIn(socket.gethostname(), stderr_text)
+            test.assertIsNone(TIMESTAMP_PATTERN.search(stderr_text))
+            test.assertIsNone(UUID_PATTERN.search(stderr_text))
             test.assertNotIn("Traceback", stderr_text)
             test.assertLessEqual(len(result.stderr), 4096)
 
-            payload: dict[str, Any] = json.loads(result.stderr)
+            payload = assert_deterministic_json_document(test, result.stderr)
             test.assertEqual(
                 set(payload),
                 {"error", "evidence_status", "report_schema_version"},
@@ -174,7 +227,6 @@ def assert_deterministic_invalid_command(
                     test.assertTrue(error["reason"])
                 if "context" in error:
                     test.assertIsInstance(error["context"], dict)
-            test.assertEqual(result.stderr, deterministic_json_bytes(payload))
             payloads.append(payload)
 
         test.assertEqual(results[0].stderr, results[1].stderr)
@@ -256,15 +308,11 @@ def assert_deterministic_success(
 
         report = json.loads(first_report)
         test.assertEqual(report["report_schema_version"], 1)
-        test.assertEqual(report["harness_version"], "0.5.0")
+        test.assertEqual(report["harness_version"], HARNESS_VERSION)
         test.assertEqual(report["overall_result"], "pass")
         test.assertEqual(
             report["evidence"],
-            {
-                "compatibility_claims": [],
-                "host_validation": "not_performed",
-                "status": "provisional",
-            },
+            PROVISIONAL_EVIDENCE,
         )
         test.assertEqual(
             report["hashes"]["input_cube_sha256"],

@@ -7,11 +7,11 @@ import sys
 from pathlib import Path
 from typing import NoReturn
 
+from ._corpus import run_request
 from ._workflow import (
     HarnessInputError,
     REPORT_SCHEMA_VERSION,
     _deterministic_json_bytes,
-    run_case,
 )
 
 
@@ -45,7 +45,8 @@ def _parser() -> _ArgumentParser:
     parser = _ArgumentParser(
         prog="python -m portable_cube_harness",
         description=(
-            "Run one provisional, test-only Portable Cube conformance case."
+            "Run one case or corpus with the provisional, test-only Portable "
+            "Cube conformance harness."
         ),
     )
     parser.add_argument("--descriptor", required=True, type=Path)
@@ -57,7 +58,7 @@ def _parser() -> _ArgumentParser:
 def main() -> int:
     try:
         args = _parser().parse_args()
-        exit_status, report_bytes = run_case(
+        exit_status, report_bytes = run_request(
             descriptor_path=args.descriptor,
             cube_path=args.cube,
             output_dir=args.output_dir,

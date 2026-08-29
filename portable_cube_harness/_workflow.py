@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, cast
 
 
-HARNESS_VERSION = "0.5.0"
+HARNESS_VERSION = "0.6.0"
 REPORT_SCHEMA_VERSION = 1
 TEST_CASE_SCHEMA_VERSION = 1
 
@@ -1279,6 +1279,14 @@ def _deterministic_json_bytes(value: object) -> bytes:
     return (text + "\n").encode("ascii")
 
 
+def _provisional_evidence() -> dict[str, object]:
+    return {
+        "compatibility_claims": [],
+        "host_validation": "not_performed",
+        "status": "provisional",
+    }
+
+
 def _rollback_outputs(
     artifacts: tuple[tuple[Path, Path], ...],
     published: set[Path],
@@ -1353,11 +1361,10 @@ def _write_outputs(output_dir: Path, canonical_cube: bytes, report: bytes) -> No
         raise HarnessInputError("The output artifacts could not be written.") from error
 
 
-def run_case(
-    *, descriptor_path: Path, cube_path: Path, output_dir: Path
+def _run_case_bytes(
+    *, descriptor_bytes: bytes, input_cube_bytes: bytes, output_dir: Path
 ) -> tuple[int, bytes]:
-    descriptor = _load_test_case(_read_bytes(descriptor_path, "test descriptor"))
-    input_cube_bytes = _read_bytes(cube_path, "Cube artifact")
+    descriptor = _load_test_case(descriptor_bytes)
     input_cube_sha256 = hashlib.sha256(input_cube_bytes).hexdigest()
     if input_cube_sha256 != descriptor.cube_sha256:
         raise HarnessInputError(
@@ -1418,11 +1425,7 @@ def run_case(
 
     report = {
         "case_id": descriptor.case_id,
-        "evidence": {
-            "compatibility_claims": [],
-            "host_validation": "not_performed",
-            "status": "provisional",
-        },
+        "evidence": _provisional_evidence(),
         "evaluation_count": len(descriptor.evaluations),
         "harness_version": HARNESS_VERSION,
         "hashes": {
@@ -1449,3 +1452,13 @@ def run_case(
     report_bytes = _deterministic_json_bytes(report)
     _write_outputs(output_dir, canonical_cube_bytes, report_bytes)
     return (0 if overall_passed else 1), report_bytes
+
+
+def run_case(
+    *, descriptor_path: Path, cube_path: Path, output_dir: Path
+) -> tuple[int, bytes]:
+    return _run_case_bytes(
+        descriptor_bytes=_read_bytes(descriptor_path, "test descriptor"),
+        input_cube_bytes=_read_bytes(cube_path, "Cube artifact"),
+        output_dir=output_dir,
+    )

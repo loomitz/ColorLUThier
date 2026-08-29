@@ -1,0 +1,202 @@
+{
+  "case_id": "identity-33-trilinear",
+  "cube": {
+    "sha256": "ed09443c84100f8d9620bb4fc22325e56b2777577b37323cc1ba940d0472ba60"
+  },
+  "evaluations": [
+    {
+      "expected": [
+        0,
+        0,
+        0
+      ],
+      "id": "node-corner-000",
+      "input": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "expected": [
+        1,
+        0,
+        0
+      ],
+      "id": "node-corner-100",
+      "input": [
+        1,
+        0,
+        0
+      ]
+    },
+    {
+      "expected": [
+        0,
+        1,
+        0
+      ],
+      "id": "node-corner-010",
+      "input": [
+        0,
+        1,
+        0
+      ]
+    },
+    {
+      "expected": [
+        1,
+        1,
+        0
+      ],
+      "id": "node-corner-110",
+      "input": [
+        1,
+        1,
+        0
+      ]
+    },
+    {
+      "expected": [
+        0,
+        0,
+        1
+      ],
+      "id": "node-corner-001",
+      "input": [
+        0,
+        0,
+        1
+      ]
+    },
+    {
+      "expected": [
+        1,
+        0,
+        1
+      ],
+      "id": "node-corner-101",
+      "input": [
+        1,
+        0,
+        1
+      ]
+    },
+    {
+      "expected": [
+        0,
+        1,
+        1
+      ],
+      "id": "node-corner-011",
+      "input": [
+        0,
+        1,
+        1
+      ]
+    },
+    {
+      "expected": [
+        1,
+        1,
+        1
+      ],
+      "id": "node-corner-111",
+      "input": [
+        1,
+        1,
+        1
+      ]
+    },
+    {
+      "expected": [
+        0.5,
+        0.5,
+        0.5
+      ],
+      "id": "node-center",
+      "input": [
+        0.5,
+        0.5,
+        0.5
+      ]
+    },
+    {
+      "expected": [
+        0,
+        1,
+        0.34375
+      ],
+      "id": "node-edge-asymmetric",
+      "input": [
+        0,
+        1,
+        0.34375
+      ]
+    },
+    {
+      "expected": [
+        1,
+        0.21875,
+        0.78125
+      ],
+      "id": "node-face-asymmetric",
+      "input": [
+        1,
+        0.21875,
+        0.78125
+      ]
+    },
+    {
+      "expected": [
+        0.03125,
+        0.21875,
+        0.90625
+      ],
+      "id": "node-interior-asymmetric-low",
+      "input": [
+        0.03125,
+        0.21875,
+        0.90625
+      ]
+    },
+    {
+      "expected": [
+        0.96875,
+        0.59375,
+        0.15625
+      ],
+      "id": "node-interior-asymmetric-high",
+      "input": [
+        0.96875,
+        0.59375,
+        0.15625
+      ]
+    },
+    {
+      "expected": [
+        0.1640625,
+        0.421875,
+        0.8671875
+      ],
+      "id": "probe-interior-dyadic-asymmetric",
+      "input": [
+        0.1640625,
+        0.421875,
+        0.8671875
+      ]
+    }
+  ],
+  "gates": {
+    "maximum_absolute_error": 9.5367431640625e-07,
+    "require_finite_outputs": true,
+    "require_node_binary32_identity": true,
+    "require_serialization_binary32_identity": true
+  },
+  "interpolation": "trilinear",
+  "oracle": {
+    "kind": "explicit_expected_values",
+    "provenance": "Manually enumerated identity values at recorded dyadic coordinates; expected RGB equals input RGB. The Cube generator did not produce these expectations."
+  },
+  "test_case_schema_version": 1
+}

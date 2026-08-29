@@ -92,6 +92,56 @@ Its 95-point corpus contains complete neutral, primary, and secondary ramps plus
 curve, generator, expected metrics, and gates are documented in
 [`DERIVATION.md`](../tests/fixtures/nonlinear-separable-5/DERIVATION.md).
 
+## Run the complete corpus
+
+The professional-size 33- and 65-point Cube inputs are generated outside the
+tracked tree so the repository does not carry more than seven megabytes of
+derived text. Materialize every tracked and generated Cube input, then run the
+descriptor and Cube directories through the same public command:
+
+```console
+python3.12 tests/materialize_portable_cube_corpus.py --output-dir build/portable-cube-inputs
+python3.12 -m portable_cube_harness --descriptor tests/fixtures --cube build/portable-cube-inputs --output-dir build/portable-cube-corpus
+```
+
+The materializer uses an independent, standard-library-only mathematical
+generator. It emits the large tables directly in red-fastest order and checks
+their bytes against fixed SHA-256 digests; it never imports the harness,
+evaluates a Cube, or creates expected values. Use a new materializer and corpus
+output directory for each repeated run.
+
+File/file arguments run one case as described above. Directory/directory
+arguments recursively discover only `case.json` and `*.case.json` descriptors
+and `*.cube` inputs. Cube filenames have no semantic meaning: each descriptor is
+matched to input bytes by its declared SHA-256 digest. Empty descriptor sets,
+duplicate case identifiers, unresolved digests, mixed file/directory arguments,
+and pre-existing corpus output directories are invalid.
+
+Because `case_id` becomes an artifact-directory name, corpus mode limits it to
+96 characters and rejects the Windows device names `con`, `prn`, `aux`, `nul`,
+`com1` through `com9`, and `lpt1` through `lpt9` on every platform. Matching
+descriptor and Cube entries must be real regular files rather than symbolic
+links or special files.
+
+Cases execute in ascending `case_id` order. A completed corpus has this layout:
+
+```text
+build/portable-cube-corpus/
+  report.json
+  cases/
+    <case-id>/
+      canonical.cube
+      report.json
+```
+
+The root `report.json` is the deterministic aggregate report and is
+byte-identical to stdout. Its sorted case array records each case result plus
+the canonical Cube and per-case report checksums. Per-case files are
+byte-identical to file/file execution; they do not acquire corpus paths or
+other environment-dependent metadata. The requested output path must remain
+absent until publication; the command claims it without replacement and moves
+`report.json` last as the completion marker.
+
 The canonical Cube uses Basic Latin text, LF line endings, red-fastest sample
 ordering, and `.9g` decimal formatting over binary32 table samples. `.9g` means
 up to nine significant decimal digits without insignificant trailing zeroes; it
@@ -122,10 +172,20 @@ finite output, stored-node binary32 identity, and serialization binary32
 identity. The nonlinear fixture uses the same explicit `2^-20` gate and has a
 closed-form maximum approximation error of `2^-21`.
 
+`maximum_absolute_error` is the largest component error. `mean_absolute_error`
+is the exact rational sum of all component errors divided by their count before
+conversion to binary64. `p99_absolute_error` is the nearest-rank 99th percentile
+of the sorted component errors. `maximum_clf_normalized_error` is the largest
+component error divided by `max(abs(expected), 0.1)`. The `input_evaluation`
+metrics describe the supplied Cube; `canonical_evaluation` repeats the same
+comparison after serialization and reparsing. Metrics are evidence, while the
+descriptor's explicit gates determine pass or fail.
+
 ## Exit statuses
 
-- `0`: the requested case passed its numerical and round-trip gates.
-- `1`: the case was valid but failed at least one conformance gate.
+- `0`: every requested case passed its numerical and round-trip gates.
+- `1`: every requested case was valid, but at least one missed a conformance
+  gate.
 - `2`: invocation, descriptor, Cube, checksum, or output validation failed.
 - `3`: the harness encountered an unexpected internal error.
 
@@ -134,6 +194,11 @@ status `1`, leaves stderr empty, writes `canonical.cube` and `report.json`, and
 copies the report bytes to stdout. A status `1` report has a successful input
 validation result and an `overall_result` of `fail`. Validation and internal
 failures emit a machine-readable, provisional error record to stderr.
+
+Corpus mode runs and publishes every valid case even when one or more cases
+return status `1`; its aggregate counts passing and failing cases. The entire
+corpus tree is staged before publication. A status `2` or `3` leaves stdout
+empty and publishes no new aggregate or per-case artifact.
 
 The two successful artifacts are staged before publication. If output
 publication fails, the command exits `2`, emits no successful report, removes
@@ -209,6 +274,29 @@ the stable top-level code `INTERNAL_ERROR` with a fixed message. It does not
 expose exception text or other implementation details. This status is distinct
 from every expected invocation, descriptor, Cube, checksum, and output
 validation failure.
+
+## Add a fixture
+
+1. Choose a stable lowercase `case_id` and add a `case.json` or
+   `*.case.json` descriptor under `tests/fixtures`.
+2. Derive every expected value independently by hand, closed-form mathematics,
+   or a separately reviewable generator. Record that derivation in
+   `DERIVATION.md` and describe it in `oracle.provenance`. Never call the
+   harness evaluator to manufacture expected values.
+3. Supply a strict Portable Cube input, calculate its SHA-256 independently,
+   and record the digest in the descriptor. For a large derived table, extend
+   the standalone materializer and pin its expected byte length and digest
+   instead of committing the generated Cube or canonical output.
+4. Select interpolation explicitly, include representative corners, nodes,
+   boundaries, and asymmetric probes, and choose finite numerical and
+   round-trip gates that follow from the independent oracle.
+5. Run the case through file/file mode, materialize and run the complete corpus
+   twice into different output directories, compare raw bytes and checksums,
+   and run the full acceptance suite.
+
+Descriptors and aggregate reports remain provisional internal test evidence.
+They are not a ColorLUThier interchange manifest and must not carry Host
+application compatibility claims.
 
 ## Run the acceptance test
 

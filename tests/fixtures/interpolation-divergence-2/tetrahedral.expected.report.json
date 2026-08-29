@@ -6,7 +6,7 @@
     "host_validation": "not_performed",
     "status": "provisional"
   },
-  "harness_version": "0.5.0",
+  "harness_version": "0.6.0",
   "hashes": {
     "canonical_cube_sha256": "b6b8490a12539728711cf4046623894c9aecc494335a3e982dcf18b53aef25f9",
     "input_cube_sha256": "e53be1a613dc9c9cd149429bb235d2ea70ff632350e1e8f5e37fbad76c735c9e"

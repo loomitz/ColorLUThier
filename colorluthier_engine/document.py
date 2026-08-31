@@ -29,6 +29,8 @@ from .model import (
     ArtifactId,
     CancelJob,
     CanonicalPortableCubeArtifact,
+    ColorContextUnknownReason,
+    ColorContextsSnapshot,
     ColorTransformationSnapshot,
     CommandResult,
     CommandStatus,
@@ -54,10 +56,13 @@ from .model import (
     RequestPreview,
     RevisionBasis,
     SnapshotRevision,
+    SourceColorContext,
     SurfaceEncoding,
     SurfaceId,
     SurfacePurpose,
     TransformationRevision,
+    UnknownColorContext,
+    WorkingColorContext,
 )
 
 
@@ -78,6 +83,14 @@ _PROVISIONAL_BEHAVIORS = (
     "display conversion.",
     "Canonical Cube artifacts are imported-lattice inspection data; ordinary "
     "color-managed export remains blocked.",
+)
+_INITIAL_COLOR_CONTEXTS = ColorContextsSnapshot(
+    selected_lane=None,
+    working=WorkingColorContext(
+        UnknownColorContext(ColorContextUnknownReason.NOT_DECLARED)
+    ),
+    proof=None,
+    display=None,
 )
 
 
@@ -181,6 +194,7 @@ class ColorDocument:
             ),
             preview=self._state.preview,
             canonical_cube_export=self._state.canonical_cube_export,
+            color_contexts=_INITIAL_COLOR_CONTEXTS,
             jobs=tuple(self._job_snapshot(record) for record in self._jobs.values()),
             provisional_behaviors=_PROVISIONAL_BEHAVIORS,
         )
@@ -229,6 +243,11 @@ class ColorDocument:
             width=decoded.width,
             height=decoded.height,
             image_format=command.image_format,
+            source_color_context=SourceColorContext(
+                UnknownColorContext(
+                    ColorContextUnknownReason.SOURCE_METADATA_MISSING
+                )
+            ),
         )
         self._state = replace(
             self._state,

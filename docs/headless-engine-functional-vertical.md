@@ -117,6 +117,52 @@ staleness check. Failure, cancellation, and stale completion do not replace a
 previously published valid preview or export. A later authored revision clears
 derived outputs because their basis no longer describes the current document.
 
+### Gate 4A: explicit Color-context scaffold
+
+Gate 4A defines an immutable, declaration-only scaffold for explicit Color
+contexts. It introduces role-specific value types for Source, Working, Proof,
+and Display color contexts, plus a standalone `ExportColorContext`. Every known
+context belongs to exactly one explicitly selected `icc-still-image` or
+`ocio-aces` Color-management lane. ICC identity requires exact profile content.
+OCIO/ACES identity requires an exact color-space name and a content-addressed
+manifest covering the configuration, every resolved resource, and every
+context-variable binding. Sample interpretation is identified separately by
+an explicit encoding-specification identity. A label, path, role, or default is
+never sufficient identity and never selects a lane. A known Display color
+context additionally requires a content-identified viewing interpretation.
+
+The initial document has no selected lane and remains inspection-only. That
+status is derived by the Gate 4A projection rather than supplied as mutable or
+parallel state. The current bootstrap PPM and PNG formats retain an unknown
+Source color context; no Source identity is inferred from their encoding. Proof
+and Display color
+contexts are absent rather than synthesized. Unknown or incomplete identities
+continue to block color-dependent authoring, managed viewing, validation, and
+ordinary export.
+
+`ExportColorContext` is declared independently from Working, Proof, and Display
+state. It requires explicit, known input and output color identities and
+encodings, numeric domain and range, interpolation convention, and Host or
+format profile. Its structure has no Proof or Display reference, so neither
+viewing leg can be inherited by or baked into an ordinary export.
+
+This scaffold adds no color-context configuration command, CMM, conversion,
+image operation, runtime dependency, or dependency adapter. It does not change
+the provisional canonical Cube artifact, its bytes or digest, or the headless
+CLI success JSON. Canonicalization remains imported-lattice inspection data and
+ordinary export remains blocked.
+
+The legacy `source_color_context_status` and `interpretation_status` fields
+remain available and serializable on `ReferenceImageSnapshot`; construction
+validates that they agree with the structured Source context. The deterministic
+headless smoke test pins the existing CLI JSON and canonical Cube digests.
+
+Gate 4 is not complete at this checkpoint. Completion requires an immutable
+whole-value declaration to be accepted transactionally through
+`ColorDocument.apply()`, together with distinct interpretation, viewing, and
+export revision bases and deterministic acceptance tests for their publication
+and invalidation rules.
+
 ## Public module surface
 
 The package layout keeps deep implementation modules behind the facade:
@@ -135,8 +181,10 @@ colorluthier_engine/
   _processing.py    cooperative preview and canonical-export work plans
 ```
 
-Only `ColorDocument.apply()` mutates engine state. `snapshot()` observes it.
-The leading-underscore modules are implementation details and are not product
+Caller-authored intent changes only through `ColorDocument.apply()`.
+Executor-owned work steps may publish job transitions and completed derived
+results; `snapshot()` only observes the resulting immutable projection. The
+leading-underscore modules are implementation details and are not product
 integration seams.
 
 ## Derived surfaces and provisional arithmetic

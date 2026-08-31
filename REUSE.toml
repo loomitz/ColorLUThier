@@ -5,6 +5,7 @@ path = [
   ".gitattributes",
   ".gitignore",
   ".github/workflows/**",
+  "colorluthier_engine/**",
   "portable_cube_harness/**",
   "tests/**/*.py",
 ]

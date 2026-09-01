@@ -4,8 +4,11 @@
 from __future__ import annotations
 
 import ast
+import struct
 import threading
 import unittest
+import zlib
+from html.parser import HTMLParser
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from urllib.parse import urlencode
@@ -16,6 +19,7 @@ from colorluthier_engine import (
     Interpolation,
     JobPurpose,
     JobState,
+    ProvisionalImageFormat,
 )
 from internal_test_ui_prototype import (
     PrototypeApplication,
@@ -46,6 +50,50 @@ def job_by_id(application: PrototypeApplication, job_id: int):
     )
 
 
+def synthetic_rgba_png() -> bytes:
+    def chunk(chunk_type: bytes, payload: bytes) -> bytes:
+        checksum = zlib.crc32(chunk_type + payload) & 0xFFFFFFFF
+        return (
+            struct.pack(">I", len(payload))
+            + chunk_type
+            + payload
+            + struct.pack(">I", checksum)
+        )
+
+    header = struct.pack(">IIBBBBB", 1, 1, 8, 6, 0, 0, 0)
+    scanline = b"\x00\x12\x34\x56\x78"
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", header)
+        + chunk(b"IDAT", zlib.compress(scanline))
+        + chunk(b"IEND", b"")
+    )
+
+
+class ReferenceFormatOptionParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self._inside_reference_format = False
+        self.values: list[str] = []
+
+    def handle_starttag(
+        self,
+        tag: str,
+        attributes: list[tuple[str, str | None]],
+    ) -> None:
+        values = dict(attributes)
+        if tag == "select" and values.get("name") == "image-format":
+            self._inside_reference_format = True
+        elif tag == "option" and self._inside_reference_format:
+            value = values.get("value")
+            if value is not None:
+                self.values.append(value)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "select" and self._inside_reference_format:
+            self._inside_reference_format = False
+
+
 class CountingRenderApplication:
     def __init__(self, application: PrototypeApplication) -> None:
         self._application = application
@@ -66,6 +114,46 @@ class CountingRenderApplication:
 
 
 class InternalTestUiPrototypeTest(unittest.TestCase):
+    def test_every_reference_format_option_is_public_and_loads_rgba_png(self) -> None:
+        option_parser = ReferenceFormatOptionParser()
+        option_parser.feed(render_page(PrototypeApplication()).decode("utf-8"))
+        public_values = tuple(image_format.value for image_format in ProvisionalImageFormat)
+        failures = []
+
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            inputs = {
+                ProvisionalImageFormat.PPM_P6_RGB8.value: SYNTHETIC_REFERENCE_PPM,
+                ProvisionalImageFormat.PNG_RGB8.value: synthetic_rgba_png(),
+            }
+            for option_value in option_parser.values:
+                try:
+                    ProvisionalImageFormat(option_value)
+                except ValueError:
+                    failures.append(f"{option_value}:not-public")
+                    encoded = synthetic_rgba_png()
+                else:
+                    encoded = inputs[option_value]
+                input_path = root / f"input-{len(failures)}.bin"
+                input_path.write_bytes(encoded)
+                application = PrototypeApplication()
+                application.dispatch_action(
+                    "open-reference-path",
+                    {
+                        "reference-path": str(input_path),
+                        "image-format": option_value,
+                    },
+                )
+                if application.notice is not None:
+                    failures.append(
+                        f"{option_value}:{application.notice.code}"
+                    )
+                if application.current.snapshot.reference is None:
+                    failures.append(f"{option_value}:not-loaded")
+
+        self.assertEqual(failures, [])
+        self.assertEqual(tuple(option_parser.values), public_values)
+
     def test_actions_map_through_adapter_and_declare_independent_export(self) -> None:
         application = PrototypeApplication()
         application.dispatch_action("load-synthetic", {})

@@ -304,8 +304,7 @@ def render_page(application: PrototypeApplication) -> bytes:
         <label>Reference path <input type="text" name="reference-path" autocomplete="off"></label>
         <label>Format <select name="image-format">
           <option value="ppm-p6-rgb8">PPM P6 RGB8</option>
-          <option value="png-rgb8">PNG RGB8</option>
-          <option value="png-rgba8">PNG RGBA8</option>
+          <option value="png-rgb8">PNG RGB/RGBA decoded to RGB8</option>
         </select></label>
         <button type="submit">Open path read-only</button>
       </form>

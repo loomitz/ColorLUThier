@@ -34,6 +34,9 @@ and any wait after forced termination have finite deadlines. A repeated timeout
 leaves the driver visibly active and fails cleanup rather than claiming success.
 Child output collected during shutdown never enters exception text; cleanup
 failures report only the return code and non-sensitive byte counts.
+The bounded readiness deadline is 60 seconds to absorb cold-start latency on
+hosted macOS runners; each shutdown wait retains its independent 10-second
+deadline.
 
 ## Acceptance commands
 

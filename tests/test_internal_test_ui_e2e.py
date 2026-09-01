@@ -448,6 +448,54 @@ class BoundedIoDriverTest(unittest.TestCase):
                 ):
                     self.assertEqual(self._readiness(b"ready\n"), b"ready")
 
+    def test_default_readiness_budget_accepts_virtual_hosted_cold_start(self) -> None:
+        class VirtualClock:
+            def __init__(self) -> None:
+                self.elapsed = 0.0
+
+            def monotonic(self) -> float:
+                return self.elapsed
+
+            def wait(self, timeout_seconds: float) -> bool:
+                self.elapsed += timeout_seconds
+                return False
+
+        clock = VirtualClock()
+        readiness = iter(b"ready\n")
+
+        def read_after_hosted_cold_start(
+            descriptor: int,
+            maximum_bytes: int,
+        ) -> bytes:
+            self.assertEqual(descriptor, 42)
+            self.assertEqual(maximum_bytes, 1)
+            if clock.elapsed < 35:
+                raise BlockingIOError(errno.EAGAIN, "pipe temporarily unavailable")
+            return bytes((next(readiness),))
+
+        stream = mock.Mock()
+        stream.fileno.return_value = 42
+        poll_wait = mock.Mock()
+        poll_wait.wait.side_effect = clock.wait
+        with (
+            mock.patch.object(e2e_support.time, "monotonic", clock.monotonic),
+            mock.patch.object(e2e_support.threading, "Event", return_value=poll_wait),
+            mock.patch.object(e2e_support.os, "get_blocking", return_value=True),
+            mock.patch.object(e2e_support.os, "set_blocking") as set_blocking,
+            mock.patch.object(
+                e2e_support.os,
+                "read",
+                side_effect=read_after_hosted_cold_start,
+            ),
+            mock.patch.object(e2e_support, "_READINESS_POLL_INTERVAL_SECONDS", 1.0),
+        ):
+            self.assertEqual(e2e_support.read_bounded_readiness(stream), b"ready")
+
+        self.assertEqual(
+            set_blocking.call_args_list,
+            [mock.call(42, False), mock.call(42, True)],
+        )
+
     def test_readiness_timeout_leaves_no_concurrent_pipe_reader(self) -> None:
         read_descriptor, write_descriptor = os.pipe()
         try:

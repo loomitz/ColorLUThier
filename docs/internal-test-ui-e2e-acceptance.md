@@ -25,7 +25,15 @@ python3.12 -m internal_test_ui_prototype
 The command binds only to `127.0.0.1`, chooses an ephemeral port by default,
 prints the exact URL to stdout, and opens it with the standard-library browser
 launcher. Stop it with Control-C. The test driver adds `--no-open` when it owns
-a headless subprocess.
+a headless subprocess and launches that child with the same `sys.executable`
+that is running the acceptance suite. The driver requests graceful SIGINT
+shutdown on POSIX hosts and uses bounded process termination on Windows, where
+SIGINT is not a portable `Popen.send_signal()` contract; a child that exits
+before that controlled shutdown still fails acceptance. Both the initial wait
+and any wait after forced termination have finite deadlines. A repeated timeout
+leaves the driver visibly active and fails cleanup rather than claiming success.
+Child output collected during shutdown never enters exception text; cleanup
+failures report only the return code and non-sensitive byte counts.
 
 ## Acceptance commands
 
@@ -38,7 +46,7 @@ PYTHONDONTWRITEBYTECODE=1 python3.12 -m unittest discover -s tests -p 'test_inte
 Run the macOS real-surface smoke only:
 
 ```console
-PYTHONDONTWRITEBYTECODE=1 python3.12 -m unittest discover -s tests -p 'test_internal_test_ui_e2e.py' -k MacOs -v
+COLORLUTHIER_RUN_REAL_SURFACE_SMOKE=1 PYTHONDONTWRITEBYTECODE=1 python3.12 -m unittest discover -s tests -p 'test_internal_test_ui_e2e.py' -k test_documented_command_opens_and_closes_only_its_real_surface -v
 ```
 
 Run the complete issue #57 acceptance slice:
@@ -74,9 +82,11 @@ The HTML parser observes forms, hidden revision-basis fields, stable
 domain state from pixels or duplicate any color arithmetic. HTTP actions are
 submitted from those rendered forms, including select defaults, selected
 options, and checked checkboxes; duplicate field names fail closed. Readiness
-and HTTP bodies require bounded, exact framing. Local-path coverage reads only
-synthetic inputs in a temporary directory and verifies their names, bytes,
-permissions, and modification times remain unchanged.
+and HTTP bodies require bounded, exact framing. The readiness reader uses one
+non-blocking pipe owner with a monotonic deadline on every supported host; it
+does not leave a worker accessing the pipe during timeout cleanup. Local-path
+coverage reads only synthetic inputs in a temporary directory and verifies
+their names, bytes, permissions, and modification times remain unchanged.
 
 ## macOS surface contract
 
@@ -92,11 +102,14 @@ unrelated windows or tabs. The wrapper is removed with its temporary directory.
 The macOS host must provide `/Applications/Safari.app` and
 `/usr/bin/osascript`, and its existing automation policy must permit the exact
 window query and close operation. The test never grants or changes permissions.
-A non-macOS host, an Apple Events denial, a prompt, or a timeout is a failing
-environmental gate rather than a skipped success. The headless and HTTP helper
-paths themselves remain portable. A control failure reports only the exact
-residual loopback URL plus non-sensitive inventory counts and target presence;
-it stops the server, preserves every other Safari document, and remains RED.
+Ordinary discovery skips only this real Safari surface test unless
+`COLORLUTHIER_RUN_REAL_SURFACE_SMOKE=1`; the synthetic privacy and driver tests
+still run. Once explicitly enabled, a non-macOS host, an Apple Events denial, a
+prompt, or a timeout is a failing environmental gate rather than a skipped
+success. The headless and HTTP helper paths themselves remain portable. A
+control failure reports only the exact residual loopback URL plus non-sensitive
+inventory counts and target presence; it stops the server, preserves every
+other Safari document, and remains RED.
 
 ## Deliberate limits
 

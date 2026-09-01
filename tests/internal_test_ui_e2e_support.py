@@ -5,13 +5,13 @@
 
 from __future__ import annotations
 
+import errno
 import os
-import selectors
 import shlex
-import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from html.parser import HTMLParser
@@ -30,6 +30,8 @@ _APPLE_EVENT_TIMEOUT_SECONDS = 5
 _APPLE_EVENT_ATTEMPTS = 40
 _MAX_READINESS_BYTES = 256
 _MAX_HTTP_BODY_BYTES = 1024 * 1024
+_READINESS_POLL_INTERVAL_SECONDS = 0.005
+_WINDOWS_PIPE_NO_DATA = 232
 _VOID_ELEMENTS = {
     "area",
     "base",
@@ -505,14 +507,27 @@ def read_bounded_readiness(
         raise ValueError("readiness byte limit must be positive")
     deadline = time.monotonic() + timeout_seconds
     collected = bytearray()
-    selector = selectors.DefaultSelector()
+    descriptor = stream.fileno()
+    was_blocking = os.get_blocking(descriptor)
+    poll_wait = threading.Event()
+    os.set_blocking(descriptor, False)
     try:
-        selector.register(stream, selectors.EVENT_READ)
         while True:
             remaining = deadline - time.monotonic()
-            if remaining <= 0 or not selector.select(remaining):
+            if remaining <= 0:
                 raise RuntimeError("prototype readiness timed out")
-            byte = os.read(stream.fileno(), 1)
+            try:
+                byte = os.read(descriptor, 1)
+            except OSError as error:
+                temporarily_unavailable = (
+                    isinstance(error, BlockingIOError)
+                    or error.errno in {errno.EAGAIN, errno.EWOULDBLOCK}
+                    or getattr(error, "winerror", None) == _WINDOWS_PIPE_NO_DATA
+                )
+                if not temporarily_unavailable:
+                    raise
+                poll_wait.wait(min(remaining, _READINESS_POLL_INTERVAL_SECONDS))
+                continue
             if not byte:
                 if collected:
                     raise RuntimeError("prototype emitted an unterminated readiness record")
@@ -523,7 +538,7 @@ def read_bounded_readiness(
             if len(collected) > maximum_bytes:
                 raise RuntimeError("prototype exceeded the readiness byte limit")
     finally:
-        selector.close()
+        os.set_blocking(descriptor, was_blocking)
 
 
 def read_bounded_http_body(
@@ -572,7 +587,7 @@ class PrototypeServerProcess:
 
     @property
     def command(self) -> tuple[str, ...]:
-        arguments = ["python3.12", "-m", "internal_test_ui_prototype"]
+        arguments = [sys.executable, "-m", "internal_test_ui_prototype"]
         if not self._open_browser:
             arguments.append("--no-open")
         return tuple(arguments)
@@ -587,9 +602,9 @@ class PrototypeServerProcess:
     def start(self) -> str:
         if self._process is not None:
             raise RuntimeError("prototype process is already started")
-        python = shutil.which("python3.12")
-        if python is None:
-            raise RuntimeError("python3.12 is required for prototype acceptance")
+        command = self.command
+        if not command[0]:
+            raise RuntimeError("the current Python interpreter is unavailable")
         self._temporary_directory = TemporaryDirectory(prefix="colorluthier-ui-e2e-")
         temporary_root = Path(self._temporary_directory.name)
         environment = os.environ.copy()
@@ -601,9 +616,6 @@ class PrototypeServerProcess:
             }
         )
         environment.update(self._extra_environment)
-        command = (python, "-m", "internal_test_ui_prototype")
-        if not self._open_browser:
-            command += ("--no-open",)
         self._process = subprocess.Popen(
             command,
             cwd=_REPOSITORY_ROOT,
@@ -672,34 +684,57 @@ class PrototypeServerProcess:
         process = self._process
         if process is None:
             return None
+        driver_terminated = False
         if process.poll() is None:
-            process.send_signal(signal.SIGINT)
+            if os.name == "nt":
+                process.terminate()
+                driver_terminated = True
+            else:
+                process.send_signal(signal.SIGINT)
+        forced_cleanup = False
+        forced_cleanup_failed = False
         try:
             remaining_stdout, self.stderr = process.communicate(
                 timeout=_SHUTDOWN_TIMEOUT_SECONDS
             )
         except subprocess.TimeoutExpired:
             process.kill()
-            remaining_stdout, self.stderr = process.communicate()
+            try:
+                remaining_stdout, self.stderr = process.communicate(
+                    timeout=_SHUTDOWN_TIMEOUT_SECONDS
+                )
+            except subprocess.TimeoutExpired:
+                forced_cleanup_failed = True
+            else:
+                forced_cleanup = True
+
+        if forced_cleanup_failed:
+            raise AssertionError(
+                "prototype did not stop after forced termination"
+            )
+        if forced_cleanup:
             return_code = process.returncode
             self._cleanup()
             if check:
-                raise AssertionError("prototype did not stop after SIGINT")
+                raise AssertionError(
+                    "prototype did not stop before forced termination"
+                )
             return return_code
         return_code = process.returncode
         self._cleanup()
         if check:
-            if return_code != 0:
+            if return_code != 0 and not driver_terminated:
                 raise AssertionError(
-                    f"prototype exited {return_code}: {self.stderr.decode(errors='replace')}"
+                    f"prototype exited {return_code}; stderr bytes {len(self.stderr)}"
                 )
             if remaining_stdout:
                 raise AssertionError(
-                    f"prototype printed unexpected stdout after readiness: {remaining_stdout!r}"
+                    "prototype printed unexpected stdout after readiness; "
+                    f"stdout bytes {len(remaining_stdout)}"
                 )
             if self.stderr:
                 raise AssertionError(
-                    f"prototype printed unexpected stderr: {self.stderr!r}"
+                    f"prototype printed unexpected stderr; stderr bytes {len(self.stderr)}"
                 )
         return return_code
 

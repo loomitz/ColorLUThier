@@ -4,10 +4,13 @@
 from __future__ import annotations
 
 import ast
+import errno
 import io
 import os
 import stat
+import subprocess
 import sys
+import traceback
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -125,6 +128,167 @@ def _input_inventory(root: Path) -> tuple[tuple[object, ...], ...]:
     return tuple(inventory)
 
 
+class PrototypeServerProcessTest(unittest.TestCase):
+    def _assert_exception_graph_omits(
+        self,
+        error: BaseException,
+        marker: bytes,
+    ) -> None:
+        self.assertIsNone(error.__cause__)
+        self.assertIsNone(error.__context__)
+        formatted = "".join(
+            traceback.format_exception(type(error), error, error.__traceback__)
+        )
+        self.assertNotIn(marker.decode("ascii"), formatted)
+
+    def test_process_driver_uses_current_interpreter_without_alias(self) -> None:
+        process = PrototypeServerProcess()
+        self.assertEqual(process.command[0], sys.executable)
+
+        with mock.patch(
+            "shutil.which",
+            side_effect=AssertionError("process driver must not resolve a Python alias"),
+        ):
+            with process as server:
+                self.assertEqual(server.get().status, 200)
+
+    def test_process_driver_uses_bounded_windows_shutdown_without_hiding_crashes(
+        self,
+    ) -> None:
+        controlled = mock.Mock()
+        controlled.poll.return_value = None
+        controlled.communicate.return_value = (b"", b"")
+        controlled.returncode = 1
+        process = PrototypeServerProcess()
+        process._process = controlled
+
+        with mock.patch.object(e2e_support.os, "name", "nt"):
+            self.assertEqual(process.stop(), 1)
+
+        controlled.terminate.assert_called_once_with()
+        controlled.send_signal.assert_not_called()
+
+        crashed = mock.Mock()
+        crashed.poll.return_value = 7
+        marker = b"SYNTHETIC_SENTINEL_NOT_FOR_LOGS"
+        captured_stderr = b"A" * 5_000 + marker
+        crashed.communicate.return_value = (b"", captured_stderr)
+        crashed.returncode = 7
+        process = PrototypeServerProcess()
+        process._process = crashed
+
+        with mock.patch.object(e2e_support.os, "name", "nt"):
+            with self.assertRaises(AssertionError) as raised:
+                process.stop()
+
+        self.assertEqual(
+            str(raised.exception),
+            f"prototype exited 7; stderr bytes {len(captured_stderr)}",
+        )
+        self._assert_exception_graph_omits(raised.exception, marker)
+
+        crashed.terminate.assert_not_called()
+        crashed.send_signal.assert_not_called()
+
+    def test_process_driver_diagnostics_never_embed_captured_output(self) -> None:
+        marker = b"SYNTHETIC_SENTINEL_NOT_FOR_LOGS"
+        captured = b"B" * 5_000 + marker
+        cases = (
+            (
+                b"",
+                captured,
+                f"prototype printed unexpected stderr; stderr bytes {len(captured)}",
+            ),
+            (
+                captured,
+                b"",
+                "prototype printed unexpected stdout after readiness; "
+                f"stdout bytes {len(captured)}",
+            ),
+        )
+
+        for stdout, stderr, expected in cases:
+            with self.subTest(expected=expected):
+                child = mock.Mock()
+                child.poll.return_value = 0
+                child.communicate.return_value = (stdout, stderr)
+                child.returncode = 0
+                process = PrototypeServerProcess()
+                process._process = child
+
+                with self.assertRaises(AssertionError) as raised:
+                    process.stop()
+
+                self.assertEqual(str(raised.exception), expected)
+                self._assert_exception_graph_omits(raised.exception, marker)
+
+    def test_process_driver_forced_cleanup_has_only_bounded_waits(self) -> None:
+        marker = b"SYNTHETIC_SENTINEL_NOT_FOR_LOGS"
+        child = mock.Mock()
+        child.poll.return_value = None
+        child.communicate.side_effect = (
+            subprocess.TimeoutExpired(
+                ("synthetic-child",),
+                10,
+                output=marker,
+                stderr=marker,
+            ),
+            (b"", b""),
+        )
+        child.returncode = -9
+        process = PrototypeServerProcess()
+        process._process = child
+
+        with self.assertRaises(AssertionError) as recovered:
+            process.stop()
+
+        self.assertEqual(
+            str(recovered.exception),
+            "prototype did not stop before forced termination",
+        )
+        self._assert_exception_graph_omits(recovered.exception, marker)
+        self.assertEqual(
+            child.communicate.call_args_list,
+            [mock.call(timeout=10), mock.call(timeout=10)],
+        )
+        child.kill.assert_called_once_with()
+        self.assertIsNone(process._process)
+
+        stuck = mock.Mock()
+        stuck.poll.return_value = None
+        stuck.communicate.side_effect = (
+            subprocess.TimeoutExpired(
+                ("synthetic-child",),
+                10,
+                output=marker,
+                stderr=marker,
+            ),
+            subprocess.TimeoutExpired(
+                ("synthetic-child",),
+                10,
+                output=marker,
+                stderr=marker,
+            ),
+        )
+        process = PrototypeServerProcess()
+        process._process = stuck
+
+        with self.assertRaises(AssertionError) as unrecovered:
+            process.stop(check=False)
+
+        self.assertEqual(
+            str(unrecovered.exception),
+            "prototype did not stop after forced termination",
+        )
+        self._assert_exception_graph_omits(unrecovered.exception, marker)
+        self.assertEqual(
+            stuck.communicate.call_args_list,
+            [mock.call(timeout=10), mock.call(timeout=10)],
+        )
+        stuck.kill.assert_called_once_with()
+        self.assertIs(process._process, stuck)
+
+
 class AccessibleFormDriverTest(unittest.TestCase):
     def test_select_defaults_selected_options_and_checked_boxes_are_submitted(
         self,
@@ -234,12 +398,79 @@ class BoundedIoDriverTest(unittest.TestCase):
             self._readiness(b"http://127.0.0.1:1234/\n"),
             b"http://127.0.0.1:1234/",
         )
-        with self.assertRaisesRegex(RuntimeError, "before readiness"):
+        with self.assertRaises(RuntimeError) as ended:
             self._readiness(b"")
-        with self.assertRaisesRegex(RuntimeError, "unterminated readiness"):
+        self.assertEqual(
+            str(ended.exception),
+            "prototype stream ended before readiness",
+        )
+        with self.assertRaises(RuntimeError) as unterminated:
             self._readiness(b"http://127.0.0.1:1234/")
-        with self.assertRaisesRegex(RuntimeError, "readiness byte limit"):
+        self.assertEqual(
+            str(unterminated.exception),
+            "prototype emitted an unterminated readiness record",
+        )
+        with self.assertRaises(RuntimeError) as over_limit:
             self._readiness(b"123456789\n", maximum_bytes=8)
+        self.assertEqual(
+            str(over_limit.exception),
+            "prototype exceeded the readiness byte limit",
+        )
+
+    def test_readiness_retries_when_a_nonblocking_pipe_has_no_data(self) -> None:
+        real_read = os.read
+
+        windows_pipe_no_data = OSError(errno.EPIPE, "Windows pipe has no data")
+        windows_pipe_no_data.winerror = 232
+        unavailable_errors = (
+            BlockingIOError(errno.EAGAIN, "pipe temporarily unavailable"),
+            windows_pipe_no_data,
+        )
+
+        for unavailable_error in unavailable_errors:
+            with self.subTest(error=repr(unavailable_error)):
+                first_read = True
+
+                def read_after_one_unavailable_attempt(
+                    descriptor: int,
+                    maximum_bytes: int,
+                ) -> bytes:
+                    nonlocal first_read
+                    if first_read:
+                        first_read = False
+                        raise unavailable_error
+                    return real_read(descriptor, maximum_bytes)
+
+                with mock.patch.object(
+                    e2e_support.os,
+                    "read",
+                    side_effect=read_after_one_unavailable_attempt,
+                ):
+                    self.assertEqual(self._readiness(b"ready\n"), b"ready")
+
+    def test_readiness_timeout_leaves_no_concurrent_pipe_reader(self) -> None:
+        read_descriptor, write_descriptor = os.pipe()
+        try:
+            os.write(write_descriptor, b"partial")
+            with os.fdopen(read_descriptor, "rb", buffering=0) as stream:
+                with self.assertRaisesRegex(RuntimeError, "readiness timed out"):
+                    e2e_support.read_bounded_readiness(
+                        stream,
+                        timeout_seconds=0.01,
+                        maximum_bytes=64,
+                    )
+                self.assertTrue(os.get_blocking(stream.fileno()))
+                os.write(write_descriptor, b"fresh\n")
+                self.assertEqual(
+                    e2e_support.read_bounded_readiness(
+                        stream,
+                        timeout_seconds=0.1,
+                        maximum_bytes=64,
+                    ),
+                    b"fresh",
+                )
+        finally:
+            os.close(write_descriptor)
 
     def test_http_body_requires_exact_bounded_content_length(self) -> None:
         self.assertEqual(
@@ -634,6 +865,29 @@ class InternalTestUiHttpAcceptanceTest(unittest.TestCase):
 
 
 class InternalTestUiMacOsSurfaceAcceptanceTest(unittest.TestCase):
+    def test_real_surface_smoke_opt_in_matches_environment(self) -> None:
+        smoke = type(self).test_documented_command_opens_and_closes_only_its_real_surface
+        enabled = os.environ.get("COLORLUTHIER_RUN_REAL_SURFACE_SMOKE") == "1"
+
+        self.assertEqual(getattr(smoke, "__unittest_skip__", False), not enabled)
+        if not enabled:
+            self.assertIn(
+                "COLORLUTHIER_RUN_REAL_SURFACE_SMOKE=1",
+                getattr(smoke, "__unittest_skip_why__", ""),
+            )
+
+    def test_opted_in_surface_smoke_remains_fail_closed_off_macos(self) -> None:
+        smoke = type(self)(
+            "test_documented_command_opens_and_closes_only_its_real_surface"
+        )
+        surface_test = type(self).test_documented_command_opens_and_closes_only_its_real_surface
+        opted_in_body = getattr(surface_test, "__wrapped__", surface_test)
+        with (
+            mock.patch.object(e2e_support.sys, "platform", "linux"),
+            self.assertRaisesRegex(BrowserSurfaceUnavailable, "macOS is required"),
+        ):
+            opted_in_body(smoke)
+
     def test_inventory_failures_do_not_expose_unrelated_urls(self) -> None:
         controller = object.__new__(SafariSurfaceController)
         residual_url = "http://127.0.0.1:54321/"
@@ -656,6 +910,10 @@ class InternalTestUiMacOsSurfaceAcceptanceTest(unittest.TestCase):
             self.assertNotIn("BEFORE_SECRET", message)
             self.assertNotIn("CURRENT_SECRET", message)
 
+    @unittest.skipUnless(
+        os.environ.get("COLORLUTHIER_RUN_REAL_SURFACE_SMOKE") == "1",
+        "set COLORLUTHIER_RUN_REAL_SURFACE_SMOKE=1 to run the real Safari surface smoke",
+    )
     def test_documented_command_opens_and_closes_only_its_real_surface(self) -> None:
         controller = SafariSurfaceController()
         wrapper_path: Path | None = None
@@ -669,7 +927,7 @@ class InternalTestUiMacOsSurfaceAcceptanceTest(unittest.TestCase):
             )
             self.assertEqual(
                 process.command,
-                ("python3.12", "-m", "internal_test_ui_prototype"),
+                (sys.executable, "-m", "internal_test_ui_prototype"),
             )
             cleanup_error: BrowserSurfaceUnavailable | None = None
             try:

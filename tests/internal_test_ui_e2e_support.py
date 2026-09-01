@@ -843,15 +843,17 @@ raise SystemExit(completed.returncode)
         for _ in range(_APPLE_EVENT_ATTEMPTS):
             try:
                 last_inventory = self.inventory()
-            except BrowserSurfaceUnavailable as error:
+            except BrowserSurfaceUnavailable:
                 raise BrowserSurfaceUnavailable(
                     f"Safari inventory failed; residual URL {url}"
-                ) from error
+                ) from None
             if last_inventory == expected:
                 return last_inventory
         raise BrowserSurfaceUnavailable(
             "Safari did not add exactly one isolated document; "
-            f"residual URL {url}; before={before!r}; current={last_inventory!r}"
+            f"residual URL {url}; expected document count {len(expected)}; "
+            f"current document count {len(last_inventory)}; "
+            f"target present {'yes' if url in last_inventory else 'no'}"
         )
 
     def wait_for_inventory(
@@ -864,16 +866,18 @@ raise SystemExit(completed.returncode)
         for _ in range(_APPLE_EVENT_ATTEMPTS):
             try:
                 last_inventory = self.inventory()
-            except BrowserSurfaceUnavailable as error:
+            except BrowserSurfaceUnavailable:
                 raise BrowserSurfaceUnavailable(
                     f"Safari inventory failed; residual URL {residual_url}"
-                ) from error
+                ) from None
             if last_inventory == expected:
                 return
         raise BrowserSurfaceUnavailable(
             "Safari did not restore the original document multiset; "
             f"residual URL {residual_url}; "
-            f"expected={expected!r}; current={last_inventory!r}"
+            f"expected document count {len(expected)}; "
+            f"current document count {len(last_inventory)}; "
+            f"target present {'yes' if residual_url in last_inventory else 'no'}"
         )
 
     def close_exact_url(self, url: str) -> int:

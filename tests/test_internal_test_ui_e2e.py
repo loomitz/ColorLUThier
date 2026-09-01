@@ -11,6 +11,7 @@ import sys
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest import mock
 
 from colorluthier_engine import (
     CommandStatus,
@@ -633,6 +634,28 @@ class InternalTestUiHttpAcceptanceTest(unittest.TestCase):
 
 
 class InternalTestUiMacOsSurfaceAcceptanceTest(unittest.TestCase):
+    def test_inventory_failures_do_not_expose_unrelated_urls(self) -> None:
+        controller = object.__new__(SafariSurfaceController)
+        residual_url = "http://127.0.0.1:54321/"
+        before = ("https://BEFORE_SECRET.invalid/",)
+        current = ("https://CURRENT_SECRET.invalid/", residual_url)
+
+        with mock.patch.object(controller, "inventory", return_value=current):
+            with self.assertRaises(BrowserSurfaceUnavailable) as added:
+                controller.wait_for_added_document(before, residual_url)
+            with self.assertRaises(BrowserSurfaceUnavailable) as restored:
+                controller.wait_for_inventory(before, residual_url=residual_url)
+
+        for failure, expected_count in ((added, 2), (restored, 1)):
+            message = str(failure.exception)
+            self.assertIn(f"residual URL {residual_url}", message)
+            self.assertIn(f"expected document count {expected_count}", message)
+            self.assertIn("current document count 2", message)
+            self.assertIn("target present yes", message)
+            self.assertEqual(message.count(residual_url), 1)
+            self.assertNotIn("BEFORE_SECRET", message)
+            self.assertNotIn("CURRENT_SECRET", message)
+
     def test_documented_command_opens_and_closes_only_its_real_surface(self) -> None:
         controller = SafariSurfaceController()
         wrapper_path: Path | None = None
@@ -652,7 +675,8 @@ class InternalTestUiMacOsSurfaceAcceptanceTest(unittest.TestCase):
             try:
                 url = process.start()
                 opened = controller.wait_for_added_document(before, url)
-                self.assertEqual(opened, tuple(sorted((*before, url))))
+                self.assertEqual(len(opened), len(before) + 1)
+                self.assertEqual(opened.count(url), before.count(url) + 1)
                 page = process.get()
                 self.assertEqual(page.status, 200)
                 self.assertIn("NOT PRODUCT UI", page.element("prototype-banner").text)
@@ -679,7 +703,9 @@ class InternalTestUiMacOsSurfaceAcceptanceTest(unittest.TestCase):
                     raise BrowserSurfaceUnavailable(
                         f"Safari cleanup failed; residual URL {url}"
                     ) from cleanup_error
-            self.assertEqual(controller.inventory(), before)
+            if url is None:
+                raise AssertionError("prototype did not publish its loopback URL")
+            controller.wait_for_inventory(before, residual_url=url)
             self.assertIsNone(process.url)
         self.assertIsNotNone(wrapper_path)
         self.assertFalse(wrapper_path.exists())

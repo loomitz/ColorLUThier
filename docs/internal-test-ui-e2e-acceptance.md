@@ -94,8 +94,9 @@ The macOS host must provide `/Applications/Safari.app` and
 window query and close operation. The test never grants or changes permissions.
 A non-macOS host, an Apple Events denial, a prompt, or a timeout is a failing
 environmental gate rather than a skipped success. The headless and HTTP helper
-paths themselves remain portable. A control failure reports the exact residual
-URL, stops the server, preserves every other Safari document, and remains RED.
+paths themselves remain portable. A control failure reports only the exact
+residual loopback URL plus non-sensitive inventory counts and target presence;
+it stops the server, preserves every other Safari document, and remains RED.
 
 ## Deliberate limits
 

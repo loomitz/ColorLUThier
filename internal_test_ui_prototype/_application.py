@@ -205,8 +205,8 @@ class PrototypeApplication:
                 "Enter a local input path before submitting the form.",
             )
             return None
-        candidate = Path(raw_path).expanduser()
         try:
+            candidate = Path(raw_path).expanduser()
             if candidate.stat().st_size > _MAX_LOCAL_INPUT_BYTES:
                 self._notice = UiNotice(
                     "UI_PATH_TOO_LARGE",
@@ -214,7 +214,7 @@ class PrototypeApplication:
                 )
                 return None
             return candidate.read_bytes()
-        except OSError:
+        except (RuntimeError, OSError):
             self._notice = UiNotice(
                 "UI_PATH_READ_FAILED",
                 "The selected local input could not be read.",

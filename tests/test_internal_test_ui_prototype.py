@@ -234,6 +234,57 @@ class InternalTestUiPrototypeTest(unittest.TestCase):
             self.assertIsNotNone(application.current.snapshot.transformation)
             self.assertEqual(tuple(root.iterdir()), before)
 
+    def test_unknown_tilde_user_path_is_contained_for_app_and_http(self) -> None:
+        missing_path = "~colorluthier-user-that-does-not-exist/reference.ppm"
+        application = PrototypeApplication()
+        application.dispatch_action("load-synthetic", {})
+        before = application.current
+
+        application.dispatch_action(
+            "open-reference-path",
+            {
+                "reference-path": missing_path,
+                "image-format": "ppm-p6-rgb8",
+            },
+        )
+
+        self.assertIs(application.current, before)
+        self.assertEqual(application.notice.code, "UI_PATH_READ_FAILED")
+
+        server = create_server(application, port=0)
+        barrier = threading.Barrier(2)
+
+        def serve() -> None:
+            barrier.wait()
+            server.serve_forever(poll_interval=0.01)
+
+        server_thread = threading.Thread(target=serve)
+        server_thread.start()
+        barrier.wait()
+        try:
+            request = Request(
+                server_url(server) + "action",
+                data=urlencode(
+                    {
+                        "action": "open-reference-path",
+                        "reference-path": missing_path,
+                        "image-format": "ppm-p6-rgb8",
+                    }
+                ).encode("ascii"),
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                method="POST",
+            )
+            with urlopen(request, timeout=5) as response:
+                rendered = response.read()
+                self.assertEqual(response.status, 200)
+            self.assertIn(b"UI_PATH_READ_FAILED", rendered)
+            self.assertIs(application.current, before)
+        finally:
+            server.shutdown()
+            server.server_close()
+            server_thread.join(timeout=5)
+        self.assertFalse(server_thread.is_alive())
+
     def test_manual_progress_cancel_and_newest_before_oldest_are_deterministic(
         self,
     ) -> None:

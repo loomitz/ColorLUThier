@@ -332,7 +332,7 @@ def _failure_record(error: _CliFailure) -> dict[str, Any]:
 
 
 def _emit(record: dict[str, Any], *, stream: Any) -> None:
-    stream.write(
+    serialized = (
         json.dumps(
             record,
             ensure_ascii=True,
@@ -341,6 +341,12 @@ def _emit(record: dict[str, Any], *, stream: Any) -> None:
         )
         + "\n"
     )
+    binary_stream = getattr(stream, "buffer", None)
+    binary_write = getattr(binary_stream, "write", None)
+    if callable(binary_write):
+        binary_write(serialized.encode("ascii"))
+        return
+    stream.write(serialized)
 
 
 def _run(arguments: argparse.Namespace) -> dict[str, Any]:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import math
 import os
 from pathlib import Path
@@ -42,6 +43,7 @@ from colorluthier_engine import (
     UnknownColorContext,
     WorkingColorContext,
 )
+from colorluthier_engine.__main__ import _emit
 
 
 IDENTITY_CUBE = (
@@ -440,6 +442,23 @@ class ColorContextScaffoldTest(unittest.TestCase):
             artifact.ordinary_export_status,
             "blocked-pending-explicit-color-contexts",
         )
+
+    def test_cli_emit_bypasses_windows_newline_translation(self) -> None:
+        encoded = io.BytesIO()
+        stream = io.TextIOWrapper(
+            encoded,
+            encoding="ascii",
+            newline="\r\n",
+            write_through=True,
+        )
+
+        _emit({"ok": True}, stream=stream)
+
+        self.assertEqual(encoded.getvalue(), b'{"ok":true}\n')
+
+        text_only_stream = io.StringIO()
+        _emit({"ok": True}, stream=text_only_stream)
+        self.assertEqual(text_only_stream.getvalue(), '{"ok":true}\n')
 
     def test_legacy_headless_smoke_remains_byte_identical(self) -> None:
         repository_root = Path(__file__).resolve().parents[1]

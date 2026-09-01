@@ -29,19 +29,24 @@ from .model import (
     ArtifactId,
     CancelJob,
     CanonicalPortableCubeArtifact,
+    ColorContextDeclaration,
+    ColorContextRevisionBasis,
     ColorContextUnknownReason,
     ColorContextsSnapshot,
     ColorTransformationSnapshot,
     CommandResult,
     CommandStatus,
     ConfigureColorTransformation,
+    DeclareColorContexts,
     DerivedSurfaceSnapshot,
     Diagnostic,
     DiagnosticField,
     DocumentCommand,
     DocumentRevision,
     DocumentSnapshot,
+    ExportRevision,
     Interpolation,
+    InterpretationRevision,
     JobId,
     JobPurpose,
     JobSnapshot,
@@ -62,6 +67,7 @@ from .model import (
     SurfacePurpose,
     TransformationRevision,
     UnknownColorContext,
+    ViewingRevision,
     WorkingColorContext,
 )
 
@@ -114,6 +120,7 @@ class _DocumentState:
     transformation: _TransformationState | None
     preview: PreviewBundle | None
     canonical_cube_export: CanonicalPortableCubeArtifact | None
+    color_contexts: ColorContextsSnapshot
 
 
 @dataclass(slots=True)
@@ -150,6 +157,7 @@ class ColorDocument:
             transformation=None,
             preview=None,
             canonical_cube_export=None,
+            color_contexts=_INITIAL_COLOR_CONTEXTS,
         )
         self._snapshot_revision = SnapshotRevision(0)
         self._next_job_id = 1
@@ -167,6 +175,8 @@ class ColorDocument:
             return self._load_portable_cube(command)
         if isinstance(command, ConfigureColorTransformation):
             return self._configure_transformation(command)
+        if isinstance(command, DeclareColorContexts):
+            return self._declare_color_contexts(command)
         if isinstance(command, RequestPreview):
             return self._request_preview()
         if isinstance(command, RequestCanonicalPortableCubeExport):
@@ -194,7 +204,7 @@ class ColorDocument:
             ),
             preview=self._state.preview,
             canonical_cube_export=self._state.canonical_cube_export,
-            color_contexts=_INITIAL_COLOR_CONTEXTS,
+            color_contexts=self._state.color_contexts,
             jobs=tuple(self._job_snapshot(record) for record in self._jobs.values()),
             provisional_behaviors=_PROVISIONAL_BEHAVIORS,
         )
@@ -258,7 +268,12 @@ class ColorDocument:
                 original_encoded=command.encoded,
             ),
             preview=None,
-            canonical_cube_export=None,
+            color_contexts=replace(
+                self._state.color_contexts,
+                interpretation_revision=InterpretationRevision(
+                    self._state.color_contexts.interpretation_revision.value + 1
+                ),
+            ),
         )
         self._touch()
         return CommandResult(CommandStatus.COMMITTED, self.snapshot())
@@ -367,6 +382,97 @@ class ColorDocument:
             transformation=_TransformationState(public=public, cube=current.cube),
             preview=None,
             canonical_cube_export=None,
+        )
+        self._touch()
+        return CommandResult(CommandStatus.COMMITTED, self.snapshot())
+
+    def _declare_color_contexts(
+        self,
+        command: DeclareColorContexts,
+    ) -> CommandResult:
+        if not isinstance(
+            command.declaration,
+            ColorContextDeclaration,
+        ) or not isinstance(command.expected, ColorContextRevisionBasis):
+            return self._rejected(
+                "COLOR_CONTEXT_DECLARATION_INVALID",
+                "The Color-context declaration or expected revisions are invalid.",
+            )
+
+        current = self._state.color_contexts
+        desired = command.declaration
+        if desired == current.declaration:
+            return self._unchanged()
+
+        if command.expected != current.revision_basis:
+            return self._rejected(
+                "COLOR_CONTEXT_REVISION_CONFLICT",
+                "The Color-context declaration was prepared from stale revisions.",
+                (
+                    (
+                        "expected_interpretation",
+                        command.expected.interpretation.value,
+                    ),
+                    (
+                        "current_interpretation",
+                        current.interpretation_revision.value,
+                    ),
+                    ("expected_viewing", command.expected.viewing.value),
+                    ("current_viewing", current.viewing_revision.value),
+                    ("expected_export", command.expected.export.value),
+                    ("current_export", current.export_revision.value),
+                ),
+            )
+
+        if current.selected_lane is not None and (
+            desired.selected_lane is not current.selected_lane
+        ):
+            return self._rejected(
+                "COLOR_MANAGEMENT_LANE_CHANGE_REQUIRES_NEW_SCOPE",
+                "Changing or removing the selected Color-management lane "
+                "requires a new ColorDocument.",
+            )
+
+        interpretation_changed = (
+            desired.selected_lane is not current.selected_lane
+            or desired.working != current.working
+        )
+        viewing_changed = (
+            desired.proof != current.proof
+            or desired.display != current.display
+        )
+        export_changed = desired.export_context != current.export_context
+
+        color_contexts = ColorContextsSnapshot(
+            selected_lane=desired.selected_lane,
+            working=desired.working,
+            proof=desired.proof,
+            display=desired.display,
+            export_context=desired.export_context,
+            interpretation_revision=InterpretationRevision(
+                current.interpretation_revision.value
+                + (1 if interpretation_changed else 0)
+            ),
+            viewing_revision=ViewingRevision(
+                current.viewing_revision.value + (1 if viewing_changed else 0)
+            ),
+            export_revision=ExportRevision(
+                current.export_revision.value + (1 if export_changed else 0)
+            ),
+        )
+        self._state = replace(
+            self._state,
+            revision=(
+                self._next_document_revision()
+                if interpretation_changed
+                else self._state.revision
+            ),
+            preview=(
+                None
+                if interpretation_changed or viewing_changed
+                else self._state.preview
+            ),
+            color_contexts=color_contexts,
         )
         self._touch()
         return CommandResult(CommandStatus.COMMITTED, self.snapshot())
@@ -573,7 +679,7 @@ class ColorDocument:
         candidate: PreviewCandidate | ExportCandidate,
     ) -> None:
         latest = self._latest_job_by_purpose.get(record.purpose)
-        if latest != record.job_id or record.basis != self._revision_basis():
+        if latest != record.job_id or not self._job_basis_is_current(record):
             record.state = JobState.STALE
             record.diagnostic = self._diagnostic(
                 "STALE_JOB_RESULT",
@@ -710,6 +816,7 @@ class ColorDocument:
         )
 
     def _revision_basis(self) -> RevisionBasis:
+        contexts = self._state.color_contexts
         return RevisionBasis(
             document=self._state.revision,
             reference=(
@@ -722,7 +829,23 @@ class ColorDocument:
                 if self._state.transformation is None
                 else self._state.transformation.public.revision
             ),
+            interpretation=contexts.interpretation_revision,
+            viewing=contexts.viewing_revision,
+            export=contexts.export_revision,
         )
+
+    def _job_basis_is_current(self, record: _JobRecord) -> bool:
+        current = self._revision_basis()
+        if record.purpose is JobPurpose.PREVIEW:
+            return (
+                record.basis.reference == current.reference
+                and record.basis.transformation == current.transformation
+                and record.basis.interpretation == current.interpretation
+                and record.basis.viewing == current.viewing
+            )
+        if record.purpose is JobPurpose.CANONICAL_PORTABLE_CUBE_EXPORT:
+            return record.basis.transformation == current.transformation
+        return False
 
     def _job_snapshot(self, record: _JobRecord) -> JobSnapshot:
         return JobSnapshot(

@@ -1,6 +1,6 @@
 # Provisional headless engine functional vertical
 
-This document describes the reconstructed first three execution gates of
+This document describes reconstructed execution Gates 1 through 4B of
 [issue #49](https://github.com/loomitz/ColorLUThier/issues/49). The vertical is
 an implementation checkpoint, not a stable project format, professional image
 pipeline, color-managed display contract, or Host-application compatibility
@@ -48,6 +48,7 @@ The supported vertical commands are:
 - `OpenReferenceImage`;
 - `LoadPortableCube`;
 - `ConfigureColorTransformation`;
+- `DeclareColorContexts`;
 - `RequestPreview`;
 - `RequestCanonicalPortableCubeExport`; and
 - `CancelJob`.
@@ -71,11 +72,13 @@ serialized; this gate does not promise concurrent method safety.
 
 ### Gate 3: revision and job model
 
-Three revision counters have distinct meanings:
+The original three revision counters have distinct meanings:
 
-- `DocumentRevision` identifies committed authored intent. Opening a different
-  reference, loading a different transformation, or changing an effective
-  transformation setting advances it. Job lifecycle changes do not.
+- `DocumentRevision` identifies committed document changes that affect authored
+  interpretation. Opening a different reference, loading a different
+  transformation, changing an effective transformation setting, or changing
+  the selected lane or Working color context advances it. Proof-, Display-, or
+  Export-only declarations and job lifecycle changes do not.
 - `TransformationRevision` identifies a loaded or reconfigured Color
   transformation. Opening a reference does not advance it.
 - `SnapshotRevision` identifies every externally observable publication or job
@@ -86,12 +89,21 @@ never reused. A no-op command does not create a revision. Previously returned
 snapshots are immutable and remain a record of what the caller observed.
 
 Every processing job captures a `RevisionBasis` containing the document,
-reference, and transformation revisions used to produce its candidate result.
+reference, transformation, interpretation, viewing, and export revisions
+present when its candidate work began. The document revision records
+provenance; it is not a universal output-validity key. Publication compares
+only the revisions on which that output purpose depends:
+
+- preview depends on reference, transformation, interpretation, and viewing;
+- canonical Portable Cube artifact generation depends only on transformation;
+  and
+- a future ordinary export will depend on transformation and export.
+
 A preview publishes an original/processed surface pair with one shared basis.
 A canonical Cube artifact records the basis that produced it. A job may
 publish only when both conditions remain true at completion:
 
-1. its captured basis is still the current basis; and
+1. its purpose-specific captured revisions are still current; and
 2. it is still the latest request for its output purpose.
 
 Otherwise, it terminates as `stale` and publishes nothing. This rule covers an
@@ -115,7 +127,9 @@ operation leaves the last valid document state unchanged. Processing is also
 transactional: candidates remain private until complete validation and a final
 staleness check. Failure, cancellation, and stale completion do not replace a
 previously published valid preview or export. A later authored revision clears
-derived outputs because their basis no longer describes the current document.
+only the derived outputs whose purpose-specific revisions it changes. An
+unrelated change may leave a valid output with an older document revision in
+its recorded provenance.
 
 ### Gate 4A: explicit Color-context scaffold
 
@@ -135,8 +149,8 @@ The initial document has no selected lane and remains inspection-only. That
 status is derived by the Gate 4A projection rather than supplied as mutable or
 parallel state. The current bootstrap PPM and PNG formats retain an unknown
 Source color context; no Source identity is inferred from their encoding. Proof
-and Display color
-contexts are absent rather than synthesized. Unknown or incomplete identities
+and Display color contexts are absent rather than synthesized. Unknown or
+incomplete identities
 continue to block color-dependent authoring, managed viewing, validation, and
 ordinary export.
 
@@ -157,11 +171,80 @@ remain available and serializable on `ReferenceImageSnapshot`; construction
 validates that they agree with the structured Source context. The deterministic
 headless smoke test pins the existing CLI JSON and canonical Cube digests.
 
-Gate 4 is not complete at this checkpoint. Completion requires an immutable
-whole-value declaration to be accepted transactionally through
-`ColorDocument.apply()`, together with distinct interpretation, viewing, and
-export revision bases and deterministic acceptance tests for their publication
-and invalidation rules.
+Gate 4A stops at the typed scaffold. Gate 4B adds its transactional declaration
+and revision behavior without changing these identity requirements.
+
+### Gate 4B: revision-aware whole-value declaration
+
+`DeclareColorContexts` accepts one immutable `ColorContextDeclaration` and an
+expected `ColorContextRevisionBasis` through `ColorDocument.apply()`. The
+declaration replaces the complete caller-owned value in one transaction:
+selected Color-management lane, Working, Proof, Display, and Export color
+contexts. `None` explicitly removes an optional Proof, Display, or Export color
+context; there is no patch or role-specific configuration command that could
+expose a partially updated declaration.
+
+Source color context is deliberately absent from `ColorContextDeclaration`.
+It remains owned by its `ReferenceImageSnapshot` and cannot be reassigned or
+carried into another Reference image by this command. Reopening the exact same
+encoded Reference image and format is unchanged. Opening a different Reference
+image replaces the Reference-owned Source color context with the value supplied
+by `ColorDocument`, currently explicit unknown because the bootstrap image
+adapter exposes no color metadata, while preserving the caller-owned
+declaration.
+
+The immutable value types enforce static lane invariants before publication.
+Every known Working, Proof, or Display color context must use the explicitly
+selected Color-management lane. A declared Export color context requires a
+selected lane, and its already-known input and output identities must use that
+same lane. Unknown identities remain inspection-only; they do not select a
+default or authorize relabeling or Cross-lane conversion. Proof and Display
+remain structurally absent from `ExportColorContext`.
+
+Once selected, a Color-management lane cannot be removed or replaced inside
+the same `ColorDocument`. Such a change requires a new authoring scope; Gate 4B
+does not reinterpret an existing Color transformation or imply a Cross-lane
+conversion.
+
+The expected basis supplies optimistic conflict detection for whole-value
+replacement. If the requested declaration already equals the current value,
+the command returns `unchanged` before conflict checking, so an exact retry is
+idempotent and advances no revision. Otherwise, the expected interpretation,
+viewing, and export revisions must all match the current basis. A mismatch is
+rejected with `COLOR_CONTEXT_REVISION_CONFLICT`; rejection leaves the document,
+outputs, jobs, and revisions unchanged.
+
+Three monotonic document-local counters describe independent semantics:
+
+- `InterpretationRevision` advances when the selected lane or Working color
+  context changes, and when a different Reference image establishes a new
+  Source color-context binding;
+- `ViewingRevision` advances when Proof or Display color context changes; and
+- `ExportRevision` advances when Export color context changes.
+
+One declaration may advance more than one of these counters. A committed
+declaration advances `DocumentRevision` once only when interpretation changes;
+viewing-only and export-only state remain outside authored interpretation.
+Every committed declaration advances `SnapshotRevision` once, regardless of
+how many semantic counters changed. An unchanged or rejected declaration
+advances none. Job lifecycle publications continue to advance only
+`SnapshotRevision`.
+
+Invalidation follows the purpose-specific revision rules established in Gate
+3. Interpretation or viewing changes clear a published preview and make
+affected in-flight preview candidates stale at their publication check. An
+export-only declaration does neither. Color-context declarations and Reference
+image changes preserve canonical Portable Cube artifacts and do not stale
+canonicalization jobs because those artifacts depend only on the Color
+transformation. A future ordinary export will be invalidated only by its
+transformation or Export color-context revision; it will not inherit Working,
+Proof, Display, or Reference state.
+
+Gate 4B remains declaration and revision infrastructure. It adds no CMM,
+conversion, managed image operation, UI, GPU path, runtime dependency, project
+schema, or ordinary-export command. `inspection_only` therefore remains true,
+and ordinary export remains blocked. The provisional canonical Cube bytes,
+their digest, and the exact headless CLI success JSON remain unchanged.
 
 ## Public module surface
 
@@ -262,16 +345,18 @@ a command, validation, input, or publication failure, and `3` is an unexpected
 internal failure.
 
 The engine result is an immutable in-memory canonicalization artifact. It is
-not an ordinary color-managed export: Gates 1–3 have no typed Export color
-context, and `ordinary_export_status` remains
+not an ordinary color-managed export. Gates 4A and 4B provide a typed, separately
+declared Export color context, but no ordinary-export command or
+representability validation. `ordinary_export_status` therefore remains
 `blocked-pending-explicit-color-contexts`. The optional filesystem adapter
 stages, flushes, and atomically replaces one explicitly requested target:
 
 The `RequestCanonicalPortableCubeExport`, `canonical_cube_export`, and
 `--export-output` names deliberately identify the revision-bound output
 operation required by Gate 3. They do not relax that fail-closed status or
-reserve the future ordinary export contract; Gate 4 must introduce the typed
-Export color context before such an operation can exist.
+reserve the future ordinary export contract. A later gate must implement the
+ordinary-export command and validation against the declared Export color
+context before such an operation can exist.
 
 ```console
 python3.12 -m colorluthier_engine \
@@ -360,10 +445,11 @@ issues:
   only after measured parity. This vertical is CPU-only and defines no display,
   HDR/EDR, or platform-surface backend.
 
-ADR 0001 remains authoritative. Typed Source, Working, Proof, Display, and
-Export color contexts and ICC versus OCIO/ACES lane enforcement belong to Gate
-4. Until then, unknown source context, unmanaged preview, and lattice-only
-canonicalization are visibly provisional. Ordinary export remains blocked and
+ADR 0001 remains authoritative. Gates 4A and 4B provide typed Source, Working,
+Proof, Display, and Export color contexts, ICC versus OCIO/ACES lane
+enforcement, and declaration revision infrastructure. The bootstrap adapter's
+Source color context remains explicitly unknown, preview remains unmanaged,
+and canonicalization remains lattice-only. Ordinary export remains blocked and
 neither surface may be presented as color-managed authoring or professional
 export.
 

@@ -20,6 +20,7 @@ from colorluthier_engine import (
     ColorManagementLane,
     ConfigureColorTransformation,
     ContentIdentity,
+    DeclareColorContexts,
     DisplayColorContext,
     DocumentCommand,
     EncodingIdentity,
@@ -358,6 +359,18 @@ class ColorContextScaffoldTest(unittest.TestCase):
             )
 
     def test_color_context_snapshot_rejects_incoherent_lane(self) -> None:
+        legacy_unknown = ColorContextsSnapshot(
+            selected_lane=None,
+            working=WorkingColorContext(
+                UnknownColorContext(ColorContextUnknownReason.NOT_AVAILABLE)
+            ),
+            proof=ProofColorContext(
+                UnknownColorContext(ColorContextUnknownReason.NOT_AVAILABLE)
+            ),
+            display=None,
+        )
+        self.assertIsNone(legacy_unknown.selected_lane)
+
         ocio_working = WorkingColorContext(
             known_context(
                 ColorManagementLane.OCIO_ACES,
@@ -394,8 +407,10 @@ class ColorContextScaffoldTest(unittest.TestCase):
             tuple(field.name for field in fields(ColorContextsSnapshot)),
         )
 
-    def test_scaffold_adds_no_command_and_canonical_flow_remains_blocked(self) -> None:
-        self.assertFalse(hasattr(engine, "DeclareColorContexts"))
+    def test_gate4b_adds_only_declaration_and_canonical_flow_remains_blocked(
+        self,
+    ) -> None:
+        self.assertIs(engine.DeclareColorContexts, DeclareColorContexts)
         self.assertFalse(hasattr(engine, "ConfigureColorContexts"))
         self.assertEqual(
             {command.__name__ for command in get_args(DocumentCommand)},
@@ -403,6 +418,7 @@ class ColorContextScaffoldTest(unittest.TestCase):
                 OpenReferenceImage.__name__,
                 LoadPortableCube.__name__,
                 ConfigureColorTransformation.__name__,
+                DeclareColorContexts.__name__,
                 RequestPreview.__name__,
                 RequestCanonicalPortableCubeExport.__name__,
                 CancelJob.__name__,

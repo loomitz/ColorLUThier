@@ -143,6 +143,50 @@ class TransformationRevision:
 
 
 @dataclass(frozen=True, slots=True, order=True)
+class InterpretationRevision:
+    value: int
+
+    def __post_init__(self) -> None:
+        if self.value < 0:
+            raise ValueError("An interpretation revision cannot be negative.")
+
+
+@dataclass(frozen=True, slots=True, order=True)
+class ViewingRevision:
+    value: int
+
+    def __post_init__(self) -> None:
+        if self.value < 0:
+            raise ValueError("A viewing revision cannot be negative.")
+
+
+@dataclass(frozen=True, slots=True, order=True)
+class ExportRevision:
+    value: int
+
+    def __post_init__(self) -> None:
+        if self.value < 0:
+            raise ValueError("An export revision cannot be negative.")
+
+
+@dataclass(frozen=True, slots=True)
+class ColorContextRevisionBasis:
+    """Semantic revisions observed when preparing a whole declaration."""
+
+    interpretation: InterpretationRevision
+    viewing: ViewingRevision
+    export: ExportRevision
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.interpretation, InterpretationRevision):
+            raise ValueError("The interpretation revision is invalid.")
+        if not isinstance(self.viewing, ViewingRevision):
+            raise ValueError("The viewing revision is invalid.")
+        if not isinstance(self.export, ExportRevision):
+            raise ValueError("The export revision is invalid.")
+
+
+@dataclass(frozen=True, slots=True, order=True)
 class JobId:
     value: int
 
@@ -430,13 +474,19 @@ class ExportColorContext:
 
 
 @dataclass(frozen=True, slots=True)
-class ColorContextsSnapshot:
-    """Immutable inspection-first scaffold for one authoring scope."""
+class ColorContextDeclaration:
+    """Complete replaceable declaration for one authoring scope.
+
+    Source remains owned by the current Reference image and is deliberately
+    absent from this value. Export semantics remain independent from Working,
+    Proof, and Display even though they are replaced in the same transaction.
+    """
 
     selected_lane: ColorManagementLane | None
     working: WorkingColorContext
-    proof: ProofColorContext | None
-    display: DisplayColorContext | None
+    proof: ProofColorContext | None = None
+    display: DisplayColorContext | None = None
+    export_context: ExportColorContext | None = None
 
     def __post_init__(self) -> None:
         if self.selected_lane is not None and not isinstance(
@@ -453,31 +503,107 @@ class ColorContextsSnapshot:
             DisplayColorContext,
         ):
             raise ValueError("The Display Color context is invalid.")
-        values = (
-            self.working.value,
-            None if self.proof is None else self.proof.value,
-            None if self.display is None else self.display.value,
-        )
-        known = tuple(
-            value for value in values if isinstance(value, KnownColorContext)
-        )
-        if known and self.selected_lane is None:
-            raise ValueError(
-                "Known Color contexts require an explicitly selected lane."
+        if self.export_context is not None and not isinstance(
+            self.export_context,
+            ExportColorContext,
+        ):
+            raise ValueError("The Export Color context is invalid.")
+
+        if self.selected_lane is None:
+            role_values = (
+                self.working.value,
+                None if self.proof is None else self.proof.value,
+                None if self.display is None else self.display.value,
             )
-        if self.selected_lane is not None and any(
-            value.lane is not self.selected_lane for value in known
+            if self.export_context is not None or any(
+                isinstance(value, KnownColorContext) for value in role_values
+            ):
+                raise ValueError(
+                    "Known or Export Color contexts require an explicitly "
+                    "selected Color-management lane."
+                )
+            return
+
+        role_values = (
+            ("Working", self.working.value),
+            (
+                "Proof",
+                None if self.proof is None else self.proof.value,
+            ),
+            (
+                "Display",
+                None if self.display is None else self.display.value,
+            ),
+        )
+        for role, value in role_values:
+            if (
+                isinstance(value, KnownColorContext)
+                and value.lane is not self.selected_lane
+            ):
+                raise ValueError(
+                    f"The {role} Color context must use the selected "
+                    "Color-management lane."
+                )
+        if self.export_context is not None and (
+            self.export_context.input_context.lane is not self.selected_lane
+            or self.export_context.output_context.lane is not self.selected_lane
         ):
             raise ValueError(
-                "Every known Color context must use the selected "
+                "The Export Color context must use the selected "
                 "Color-management lane."
             )
 
+
+@dataclass(frozen=True, slots=True)
+class ColorContextsSnapshot:
+    """Immutable declared Color contexts and their semantic revisions."""
+
+    selected_lane: ColorManagementLane | None
+    working: WorkingColorContext
+    proof: ProofColorContext | None
+    display: DisplayColorContext | None
+    export_context: ExportColorContext | None = None
+    interpretation_revision: InterpretationRevision = InterpretationRevision(0)
+    viewing_revision: ViewingRevision = ViewingRevision(0)
+    export_revision: ExportRevision = ExportRevision(0)
+
+    def __post_init__(self) -> None:
+        ColorContextDeclaration(
+            selected_lane=self.selected_lane,
+            working=self.working,
+            proof=self.proof,
+            display=self.display,
+            export_context=self.export_context,
+        )
+        ColorContextRevisionBasis(
+            interpretation=self.interpretation_revision,
+            viewing=self.viewing_revision,
+            export=self.export_revision,
+        )
+
     @property
     def inspection_only(self) -> bool:
-        """Gate 4A has no CMM or managed interpretation, so this stays true."""
+        """Gate 4B declares semantics but performs no managed conversion."""
 
         return True
+
+    @property
+    def declaration(self) -> ColorContextDeclaration:
+        return ColorContextDeclaration(
+            selected_lane=self.selected_lane,
+            working=self.working,
+            proof=self.proof,
+            display=self.display,
+            export_context=self.export_context,
+        )
+
+    @property
+    def revision_basis(self) -> ColorContextRevisionBasis:
+        return ColorContextRevisionBasis(
+            interpretation=self.interpretation_revision,
+            viewing=self.viewing_revision,
+            export=self.export_revision,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -502,6 +628,14 @@ class ConfigureColorTransformation:
 
 
 @dataclass(frozen=True, slots=True)
+class DeclareColorContexts:
+    """Atomically replace the complete authoring-scope declaration."""
+
+    declaration: ColorContextDeclaration
+    expected: ColorContextRevisionBasis
+
+
+@dataclass(frozen=True, slots=True)
 class RequestPreview:
     pass
 
@@ -512,7 +646,8 @@ class RequestCanonicalPortableCubeExport:
 
     The export vocabulary identifies the revision-bound output operation
     required by this vertical.  ``ordinary_export_status`` remains blocked
-    until a later gate introduces an explicit Export color context.
+    until a later gate implements ordinary export against the declared Export
+    color context.
     """
 
     pass
@@ -527,6 +662,7 @@ DocumentCommand: TypeAlias = (
     OpenReferenceImage
     | LoadPortableCube
     | ConfigureColorTransformation
+    | DeclareColorContexts
     | RequestPreview
     | RequestCanonicalPortableCubeExport
     | CancelJob
@@ -554,6 +690,9 @@ class RevisionBasis:
     document: DocumentRevision
     reference: DocumentRevision | None
     transformation: TransformationRevision | None
+    interpretation: InterpretationRevision = InterpretationRevision(0)
+    viewing: ViewingRevision = ViewingRevision(0)
+    export: ExportRevision = ExportRevision(0)
 
 
 @dataclass(frozen=True, slots=True)
@@ -672,6 +811,9 @@ class DocumentSnapshot:
                 if self.transformation is None
                 else self.transformation.revision
             ),
+            interpretation=self.color_contexts.interpretation_revision,
+            viewing=self.color_contexts.viewing_revision,
+            export=self.color_contexts.export_revision,
         )
 
 

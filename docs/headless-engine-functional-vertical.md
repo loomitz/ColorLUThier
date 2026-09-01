@@ -1,6 +1,6 @@
 # Provisional headless engine functional vertical
 
-This document describes reconstructed execution Gates 1 through 4B of
+This document describes reconstructed execution Gates 1 through 5 of
 [issue #49](https://github.com/loomitz/ColorLUThier/issues/49). The vertical is
 an implementation checkpoint, not a stable project format, professional image
 pipeline, color-managed display contract, or Host-application compatibility
@@ -50,6 +50,7 @@ The supported vertical commands are:
 - `ConfigureColorTransformation`;
 - `DeclareColorContexts`;
 - `RequestPreview`;
+- `RequestFullResolutionEvaluation`;
 - `RequestCanonicalPortableCubeExport`; and
 - `CancelJob`.
 
@@ -95,6 +96,8 @@ provenance; it is not a universal output-validity key. Publication compares
 only the revisions on which that output purpose depends:
 
 - preview depends on reference, transformation, interpretation, and viewing;
+- full-resolution evaluation depends on reference, transformation, and
+  interpretation, but not viewing or export;
 - canonical Portable Cube artifact generation depends only on transformation;
   and
 - a future ordinary export will depend on transformation and export.
@@ -115,7 +118,8 @@ Jobs move through `queued`, `running`, and one terminal state: `succeeded`,
 positive total. Completed units remain in the closed interval from zero
 through the total and increase monotonically. Preview work reports one unit per
 source row plus one completion/publication unit. Canonical export uses one
-serialization unit plus one validation/publication unit.
+serialization unit plus one validation/publication unit. Full-resolution work
+uses the same one-unit-per-source-row plan plus one validation/publication unit.
 
 Cancellation marks a non-terminal job as `cancelled` before publication. A
 controlled executor can therefore prove cancellation both before the first
@@ -126,10 +130,10 @@ Immediate commands are transactional: a rejected decode, parse, or validation
 operation leaves the last valid document state unchanged. Processing is also
 transactional: candidates remain private until complete validation and a final
 staleness check. Failure, cancellation, and stale completion do not replace a
-previously published valid preview or export. A later authored revision clears
-only the derived outputs whose purpose-specific revisions it changes. An
-unrelated change may leave a valid output with an older document revision in
-its recorded provenance.
+previously published valid preview, full-resolution result, or export. A later
+authored revision clears only the derived outputs whose purpose-specific
+revisions it changes. An unrelated change may leave a valid output with an
+older document revision in its recorded provenance.
 
 ### Gate 4A: explicit Color-context scaffold
 
@@ -246,6 +250,45 @@ schema, or ordinary-export command. `inspection_only` therefore remains true,
 and ordinary export remains blocked. The provisional canonical Cube bytes,
 their digest, and the exact headless CLI success JSON remain unchanged.
 
+### Gate 5: bounded full-resolution evaluation
+
+`RequestFullResolutionEvaluation` adds a distinct job and result purpose
+through the existing `ColorDocument.apply()` and `snapshot()` seam. It is not a
+renamed preview and does not create an executor, cache, or resource-management
+API. Admission, scanline planning, storage accounting, job history, and result
+retention remain private implementation policy.
+
+The job evaluates the complete current Reference image at its Source
+resolution. It uses the same Source RGB8 normalization, selected Portable Cube
+interpolation, bypass, mix, binary64 arithmetic order, and binary32 storage as
+the processed preview. It publishes one `processed-full-resolution` surface;
+the authored Reference image already owns the source values, so Gate 5 does not
+retain a duplicate original surface. Proof and Display are viewing state and
+are neither evaluated nor baked. Export color context is also outside this
+purpose.
+
+Work is deterministic: each source scanline is one cooperative unit and one
+final unit validates staleness and publishes the complete immutable result.
+Progress is monotonic and bounded. A result publishes only if its captured
+reference, transformation, and interpretation revisions remain current and it
+is still the latest full-resolution request. Viewing-only and export-only
+declarations neither clear nor stale it. Reference, transformation, or
+interpretation changes invalidate a published result and make an in-flight
+candidate stale.
+
+Storage admission is overflow-safe and occurs before a job record is created.
+The provisional pixel ceiling is intentionally lower than the Reference-image
+ceiling so boundary evidence remains practical. Output bytes and the temporary
+mutable buffer that coexists during conversion to immutable bytes are accounted
+separately. Failure, cancellation, and stale out-of-order completion publish
+nothing and preserve the latest still-valid result. Successful publication
+replaces that single retained derived result deterministically; authored state
+is never an eviction target.
+
+Gate 5 remains a bounded CPU evidence path. It adds no batch API, ordinary
+export, CMM, Proof or Display conversion, GPU path, UI, project schema, runtime
+dependency, or production import of the deterministic test executor.
+
 ## Public module surface
 
 The package layout keeps deep implementation modules behind the facade:
@@ -261,7 +304,7 @@ colorluthier_engine/
   _image_source.py  replaceable image-source port and stdlib adapter
   _reference.py     provisional bounded synthetic-image adapter
   _portable_cube.py production Portable Cube adapter
-  _processing.py    cooperative preview and canonical-export work plans
+  _processing.py    cooperative preview, full-resolution, and export plans
 ```
 
 Caller-authored intent changes only through `ColorDocument.apply()`.
@@ -283,6 +326,9 @@ preview is provisional and uses binary64 evaluation followed by
 `source + mix * (evaluated - source)`, then stores binary32 components. Bypass
 copies the normalized source values. This behavior does not define global
 adjustments, compositing, masks, a display transform, or future export baking.
+Full-resolution evaluation shares that arithmetic implementation but publishes
+only the processed surface. Its result is source-resolution processing evidence,
+not a display-ready surface or ordinary export.
 
 Portable Cube parsing and evaluation retain the existing strict contract:
 Basic Latin text, LF canonical output, exactly one `LUT_3D_SIZE` from 2 through
@@ -306,7 +352,12 @@ Current limits are deliberately conservative bootstrap limits:
 | Portable Cube encoded input | 16 MiB |
 | Portable Cube lattice | 2 through 65 samples per axis |
 | Active document jobs | 4 |
+| Queued work | 8,194 remaining scanline/publication units |
 | Retained job history | 128 records |
+| Full-resolution pixels | 262,144 pixels |
+| Full-resolution immutable output | 3 MiB |
+| Full-resolution conversion scratch | 3 MiB |
+| Retained full-resolution results | 1, latest only |
 | Controlled test-executor default queue | 16 jobs |
 
 PNG chunk structure, CRCs, dimensions, decompressed length, scanline filters,
@@ -450,11 +501,11 @@ Proof, Display, and Export color contexts, ICC versus OCIO/ACES lane
 enforcement, and declaration revision infrastructure. The bootstrap adapter's
 Source color context remains explicitly unknown, preview remains unmanaged,
 and canonicalization remains lattice-only. Ordinary export remains blocked and
-neither surface may be presented as color-managed authoring or professional
+no derived surface may be presented as color-managed authoring or professional
 export.
 
-The vertical also excludes a stable project format, full-resolution/batch
-execution, a generic authoring graph, new UIs, platform-specific state,
+The vertical also excludes a stable project format, batch execution, a generic
+authoring graph, new UIs, platform-specific state,
 professional codec dependencies, concrete ICC/OCIO integration, GPU execution,
 additional LUT dialects, and formulas inferred from qualitative or private
 issue #13 evidence.

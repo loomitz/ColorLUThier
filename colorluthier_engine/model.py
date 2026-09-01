@@ -94,6 +94,7 @@ class CommandStatus(StrEnum):
 
 class JobPurpose(StrEnum):
     PREVIEW = "preview"
+    FULL_RESOLUTION_EVALUATION = "full-resolution-evaluation"
     CANONICAL_PORTABLE_CUBE_EXPORT = "canonical-portable-cube-export"
 
 
@@ -109,6 +110,7 @@ class JobState(StrEnum):
 class SurfacePurpose(StrEnum):
     ORIGINAL_PREVIEW = "original-preview"
     PROCESSED_PREVIEW = "processed-preview"
+    PROCESSED_FULL_RESOLUTION = "processed-full-resolution"
 
 
 class SurfaceEncoding(StrEnum):
@@ -641,6 +643,13 @@ class RequestPreview:
 
 
 @dataclass(frozen=True, slots=True)
+class RequestFullResolutionEvaluation:
+    """Request bounded source-resolution evaluation without viewing state."""
+
+    pass
+
+
+@dataclass(frozen=True, slots=True)
 class RequestCanonicalPortableCubeExport:
     """Request file-ready canonical bytes, not an ordinary color export.
 
@@ -664,6 +673,7 @@ DocumentCommand: TypeAlias = (
     | ConfigureColorTransformation
     | DeclareColorContexts
     | RequestPreview
+    | RequestFullResolutionEvaluation
     | RequestCanonicalPortableCubeExport
     | CancelJob
 )
@@ -761,6 +771,14 @@ class PreviewBundle:
 
 
 @dataclass(frozen=True, slots=True)
+class FullResolutionResult:
+    job_id: JobId
+    basis: RevisionBasis
+    processed: DerivedSurfaceSnapshot
+    evidence_status: str = "provisional"
+
+
+@dataclass(frozen=True, slots=True)
 class CanonicalPortableCubeArtifact:
     artifact_id: ArtifactId
     job_id: JobId
@@ -801,6 +819,7 @@ class DocumentSnapshot:
         proof=None,
         display=None,
     )
+    full_resolution: FullResolutionResult | None = None
 
     def revision_basis(self) -> RevisionBasis:
         return RevisionBasis(

@@ -138,6 +138,12 @@ class InternalTestUiAdapter:
                 disposition=SnapshotDisposition.REJECTED_OLDER,
                 candidate_revision=snapshot.snapshot_revision,
             )
+        if snapshot != self._document.snapshot():
+            return RenderUpdate(
+                state=self._current,
+                disposition=SnapshotDisposition.REJECTED_NOT_OWNED,
+                candidate_revision=snapshot.snapshot_revision,
+            )
 
         self._current = RenderState(
             snapshot=snapshot,

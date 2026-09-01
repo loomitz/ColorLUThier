@@ -39,9 +39,12 @@ capability. Consumers classify errors with `Diagnostic.code` and read bounded
 details from `Diagnostic.context`; they do not parse English messages.
 
 The snapshot revision is the rendering watermark. A lower revision is rejected
-without replacing `current`. An equal revision is accepted, because a rejected
+without replacing `current`. At the same or a higher revision, the candidate
+must also equal the immutable current snapshot of the `ColorDocument` owned by
+this adapter; otherwise it is rejected as not owned and cannot poison the
+watermark or feedback. An equal owned revision is accepted, because a rejected
 command can legitimately update render feedback while engine state remains at
-the same revision. A higher revision replaces the current snapshot.
+the same revision. A higher owned revision replaces the current snapshot.
 
 ## Serialization and work delivery
 

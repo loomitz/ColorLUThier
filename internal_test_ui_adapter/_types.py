@@ -91,6 +91,7 @@ UiIntent: TypeAlias = (
 class SnapshotDisposition(StrEnum):
     ACCEPTED = "accepted"
     REJECTED_OLDER = "rejected-older"
+    REJECTED_NOT_OWNED = "rejected-not-owned"
 
 
 @dataclass(frozen=True, slots=True)

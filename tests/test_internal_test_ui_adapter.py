@@ -306,6 +306,51 @@ class InternalTestUiAdapterAcceptanceTest(unittest.TestCase):
         self.assertEqual(equal.disposition, SnapshotDisposition.ACCEPTED)
         self.assertIs(equal.state.snapshot, current.snapshot)
 
+    def test_foreign_higher_snapshot_cannot_poison_the_owned_watermark(self) -> None:
+        owned_adapter = InternalTestUiAdapter()
+        owned_feedback = owned_adapter.dispatch(
+            OpenReferenceIntent(
+                b"not a PPM",
+                ProvisionalImageFormat.PPM_P6_RGB8,
+            )
+        ).state
+        self.assertEqual(owned_feedback.watermark.value, 0)
+        self.assertEqual(
+            owned_feedback.diagnostic_code,
+            "REFERENCE_STRUCTURE_INVALID",
+        )
+
+        foreign_adapter = InternalTestUiAdapter()
+        foreign_adapter.dispatch(
+            OpenReferenceIntent(ppm(), ProvisionalImageFormat.PPM_P6_RGB8)
+        )
+        foreign_adapter.dispatch(
+            LoadPortableCubeIntent(IDENTITY_CUBE, Interpolation.TRILINEAR)
+        )
+        foreign_snapshot = foreign_adapter.current.snapshot
+        self.assertEqual(foreign_snapshot.snapshot_revision.value, 2)
+
+        rejected = owned_adapter.accept_snapshot(foreign_snapshot)
+
+        self.assertEqual(
+            rejected.disposition,
+            SnapshotDisposition.REJECTED_NOT_OWNED,
+        )
+        self.assertIs(rejected.state, owned_feedback)
+        self.assertIs(owned_adapter.current, owned_feedback)
+        self.assertEqual(owned_adapter.current.watermark.value, 0)
+        self.assertEqual(
+            owned_adapter.current.diagnostic_code,
+            "REFERENCE_STRUCTURE_INVALID",
+        )
+
+        committed = owned_adapter.dispatch(
+            OpenReferenceIntent(ppm(), ProvisionalImageFormat.PPM_P6_RGB8)
+        )
+        self.assertEqual(committed.state.command_status, CommandStatus.COMMITTED)
+        self.assertEqual(committed.state.watermark.value, 1)
+        self.assertIs(owned_adapter.current, committed.state)
+
     def test_cancel_and_malformed_input_preserve_last_valid_result(self) -> None:
         executor = ControlledExecutor()
         adapter = self.ready_adapter(executor)

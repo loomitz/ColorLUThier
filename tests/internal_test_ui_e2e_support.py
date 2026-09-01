@@ -7,14 +7,17 @@ from __future__ import annotations
 
 import os
 import selectors
+import shlex
 import shutil
 import signal
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import BinaryIO
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
@@ -25,6 +28,8 @@ _REQUEST_TIMEOUT_SECONDS = 5
 _SHUTDOWN_TIMEOUT_SECONDS = 10
 _APPLE_EVENT_TIMEOUT_SECONDS = 5
 _APPLE_EVENT_ATTEMPTS = 40
+_MAX_READINESS_BYTES = 256
+_MAX_HTTP_BODY_BYTES = 1024 * 1024
 _VOID_ELEMENTS = {
     "area",
     "base",
@@ -76,13 +81,33 @@ class AccessibleForm:
 
     @property
     def action(self) -> str | None:
-        return dict(self.fields).get("action")
+        return self._validated_fields().get("action")
 
     def field(self, name: str) -> str:
+        fields = self._validated_fields()
         try:
-            return dict(self.fields)[name]
+            return fields[name]
         except KeyError:
             raise AssertionError(f"form does not expose field {name!r}") from None
+
+    def submission(
+        self,
+        overrides: dict[str, str] | None = None,
+    ) -> tuple[tuple[str, str], ...]:
+        fields = self._validated_fields()
+        for name, value in ({} if overrides is None else overrides).items():
+            if not isinstance(name, str) or not isinstance(value, str):
+                raise TypeError("form submission overrides must be text")
+            fields[name] = value
+        return tuple(fields.items())
+
+    def _validated_fields(self) -> dict[str, str]:
+        validated: dict[str, str] = {}
+        for name, value in self.fields:
+            if name in validated:
+                raise AssertionError(f"form exposes duplicate field name {name!r}")
+            validated[name] = value
+        return validated
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,6 +158,27 @@ class AccessiblePage:
             )
         return matches[0]
 
+    def action_form(
+        self,
+        action: str,
+        required_fields: dict[str, str] | None = None,
+    ) -> AccessibleForm:
+        expected = {} if required_fields is None else required_fields
+        matches = []
+        for form in self.forms:
+            if form.action != action:
+                continue
+            try:
+                if all(form.field(name) == value for name, value in expected.items()):
+                    matches.append(form)
+            except AssertionError:
+                continue
+        if len(matches) != 1:
+            raise AssertionError(
+                f"expected one action form {action!r}, found {len(matches)}"
+            )
+        return matches[0]
+
     def job(self, job_id: int) -> AccessibleJob:
         try:
             return next(job for job in self.jobs if job.job_id == job_id)
@@ -174,6 +220,22 @@ class _DefinitionCapture:
 
 
 @dataclass(slots=True)
+class _SelectCapture:
+    depth: int
+    name: str
+    multiple: bool
+    options: list[tuple[str, bool]]
+
+
+@dataclass(slots=True)
+class _OptionCapture:
+    depth: int
+    value: str | None
+    selected: bool
+    chunks: list[str]
+
+
+@dataclass(slots=True)
 class _JobCapture:
     depth: int
     attributes: dict[str, str]
@@ -197,6 +259,8 @@ class _AccessiblePageParser(HTMLParser):
         self._form_capture: _FormCapture | None = None
         self._definition_capture: _DefinitionCapture | None = None
         self._pending_definition_term: tuple[_ElementCapture, str] | None = None
+        self._select_capture: _SelectCapture | None = None
+        self._option_capture: _OptionCapture | None = None
         self._job_capture: _JobCapture | None = None
         self._cell_capture: _CellCapture | None = None
 
@@ -232,8 +296,29 @@ class _AccessiblePageParser(HTMLParser):
             )
         elif tag == "input" and self._form_capture is not None:
             name = values.get("name")
-            if name is not None:
+            input_type = values.get("type", "text").lower()
+            successful = input_type not in {"checkbox", "radio"} or "checked" in values
+            if name is not None and successful:
+                default_value = "on" if input_type in {"checkbox", "radio"} else ""
                 self._form_capture.fields.append((name, values.get("value", "")))
+                if self._form_capture.fields[-1][1] == "" and default_value:
+                    self._form_capture.fields[-1] = (name, default_value)
+        elif tag == "select" and self._form_capture is not None:
+            name = values.get("name")
+            if name is not None:
+                self._select_capture = _SelectCapture(
+                    depth=self.depth,
+                    name=name,
+                    multiple="multiple" in values,
+                    options=[],
+                )
+        elif tag == "option" and self._select_capture is not None:
+            self._option_capture = _OptionCapture(
+                depth=self.depth,
+                value=values.get("value"),
+                selected="selected" in values,
+                chunks=[],
+            )
 
         if tag in {"dt", "dd"} and self._element_captures:
             self._definition_capture = _DefinitionCapture(
@@ -269,10 +354,40 @@ class _AccessiblePageParser(HTMLParser):
             capture.chunks.append(data)
         if self._definition_capture is not None:
             self._definition_capture.chunks.append(data)
+        if self._option_capture is not None:
+            self._option_capture.chunks.append(data)
         if self._cell_capture is not None:
             self._cell_capture.chunks.append(data)
 
     def handle_endtag(self, tag: str) -> None:
+        if (
+            self._option_capture is not None
+            and tag == "option"
+            and self._option_capture.depth == self.depth
+        ):
+            option = self._option_capture
+            value = _normalize(option.chunks) if option.value is None else option.value
+            if self._select_capture is not None:
+                self._select_capture.options.append((value, option.selected))
+            self._option_capture = None
+
+        if (
+            self._select_capture is not None
+            and tag == "select"
+            and self._select_capture.depth == self.depth
+        ):
+            select = self._select_capture
+            selected = tuple(value for value, is_selected in select.options if is_selected)
+            if select.multiple:
+                chosen = selected
+            elif selected:
+                chosen = selected[-1:]
+            else:
+                chosen = tuple(value for value, _ in select.options[:1])
+            if self._form_capture is not None:
+                self._form_capture.fields.extend((select.name, value) for value in chosen)
+            self._select_capture = None
+
         if (
             self._cell_capture is not None
             and tag == "td"
@@ -376,6 +491,69 @@ def parse_accessible_page(
     )
 
 
+def read_bounded_readiness(
+    stream: BinaryIO,
+    *,
+    timeout_seconds: float = _READINESS_TIMEOUT_SECONDS,
+    maximum_bytes: int = _MAX_READINESS_BYTES,
+) -> bytes:
+    """Read exactly one LF-terminated readiness record without unbounded reads."""
+
+    if timeout_seconds <= 0:
+        raise ValueError("readiness timeout must be positive")
+    if maximum_bytes <= 0:
+        raise ValueError("readiness byte limit must be positive")
+    deadline = time.monotonic() + timeout_seconds
+    collected = bytearray()
+    selector = selectors.DefaultSelector()
+    try:
+        selector.register(stream, selectors.EVENT_READ)
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not selector.select(remaining):
+                raise RuntimeError("prototype readiness timed out")
+            byte = os.read(stream.fileno(), 1)
+            if not byte:
+                if collected:
+                    raise RuntimeError("prototype emitted an unterminated readiness record")
+                raise RuntimeError("prototype stream ended before readiness")
+            if byte == b"\n":
+                return bytes(collected)
+            collected.extend(byte)
+            if len(collected) > maximum_bytes:
+                raise RuntimeError("prototype exceeded the readiness byte limit")
+    finally:
+        selector.close()
+
+
+def read_bounded_http_body(
+    response: object,
+    *,
+    maximum_bytes: int = _MAX_HTTP_BODY_BYTES,
+) -> bytes:
+    """Read a response body only when its declared length is exact and bounded."""
+
+    if maximum_bytes < 0:
+        raise ValueError("HTTP body byte limit must not be negative")
+    headers = getattr(response, "headers")
+    raw_length = headers.get("Content-Length")
+    if raw_length is None:
+        raise RuntimeError("HTTP Content-Length is missing")
+    try:
+        content_length = int(raw_length)
+    except (TypeError, ValueError):
+        raise RuntimeError("HTTP Content-Length is invalid") from None
+    if content_length < 0:
+        raise RuntimeError("HTTP Content-Length is invalid")
+    if content_length > maximum_bytes:
+        raise RuntimeError("HTTP response exceeds the byte limit")
+    read = getattr(response, "read")
+    payload = read(content_length + 1)
+    if len(payload) != content_length:
+        raise RuntimeError("HTTP body length is not exact")
+    return payload
+
+
 class PrototypeServerProcess:
     """Start the documented prototype command and drive it over loopback HTTP."""
 
@@ -435,15 +613,16 @@ class PrototypeServerProcess:
             stderr=subprocess.PIPE,
         )
         assert self._process.stdout is not None
-        selector = selectors.DefaultSelector()
         try:
-            selector.register(self._process.stdout, selectors.EVENT_READ)
-            if not selector.select(_READINESS_TIMEOUT_SECONDS):
-                raise RuntimeError("prototype did not print a readiness URL")
-            line = self._process.stdout.readline()
-        finally:
-            selector.close()
-        candidate = line.decode("ascii", errors="strict").strip()
+            line = read_bounded_readiness(self._process.stdout)
+        except Exception:
+            self.stop(check=False)
+            raise
+        try:
+            candidate = line.decode("ascii", errors="strict").strip()
+        except UnicodeDecodeError:
+            self.stop(check=False)
+            raise RuntimeError("prototype printed non-ASCII readiness URL") from None
         if not candidate.startswith("http://127.0.0.1:") or not candidate.endswith("/"):
             self.stop(check=False)
             raise RuntimeError(f"prototype printed invalid readiness URL {candidate!r}")
@@ -454,19 +633,27 @@ class PrototypeServerProcess:
         if self.url is None:
             raise RuntimeError("prototype process is not started")
         with urlopen(self.url, timeout=_REQUEST_TIMEOUT_SECONDS) as response:
-            payload = response.read()
+            payload = read_bounded_http_body(response)
             return parse_accessible_page(
                 payload,
                 status=response.status,
                 content_type=response.headers.get("Content-Type", ""),
             )
 
-    def post(self, action: str, fields: dict[str, str] | None = None) -> AccessiblePage:
+    def submit(
+        self,
+        form: AccessibleForm,
+        overrides: dict[str, str] | None = None,
+    ) -> AccessiblePage:
         if self.url is None:
             raise RuntimeError("prototype process is not started")
-        submitted = {"action": action}
-        if fields is not None:
-            submitted.update(fields)
+        if not isinstance(form, AccessibleForm):
+            raise TypeError("submission requires an AccessibleForm")
+        if form.method != "post" or form.target != "/action":
+            raise AssertionError("form submission must be POST /action")
+        submitted = form.submission(overrides)
+        if not any(name == "action" and value for name, value in submitted):
+            raise AssertionError("form submission requires an action field")
         request = Request(
             self.url + "action",
             data=urlencode(submitted).encode("ascii"),
@@ -474,7 +661,7 @@ class PrototypeServerProcess:
             method="POST",
         )
         with urlopen(request, timeout=_REQUEST_TIMEOUT_SECONDS) as response:
-            payload = response.read()
+            payload = read_bounded_http_body(response)
             return parse_accessible_page(
                 payload,
                 status=response.status,
@@ -529,22 +716,29 @@ class BrowserSurfaceUnavailable(RuntimeError):
 
 
 class SafariSurfaceController:
-    """Observe and close only one Safari document with the exact ephemeral URL."""
+    """Create, inventory, and close one isolated Safari document by exact URL."""
 
-    _COUNT_SCRIPT = """
-on run argv
-    set targetUrl to item 1 of argv
-    set matchCount to 0
+    _INVENTORY_SCRIPT = """
+on run
+    set separator to character id 30
+    set previousDelimiters to AppleScript's text item delimiters
+    set documentUrls to {}
     tell application "Safari"
         repeat with candidate in documents
+            set candidateUrl to "<missing-url>"
             try
-                if (URL of candidate as text) is targetUrl then
-                    set matchCount to matchCount + 1
+                set rawUrl to URL of candidate
+                if rawUrl is not missing value then
+                    set candidateUrl to rawUrl as text
                 end if
             end try
+            copy candidateUrl to end of documentUrls
         end repeat
     end tell
-    return matchCount as text
+    set AppleScript's text item delimiters to separator
+    set serializedUrls to documentUrls as text
+    set AppleScript's text item delimiters to previousDelimiters
+    return serializedUrls
 end run
 """
     _CLOSE_SCRIPT = """
@@ -558,11 +752,21 @@ on run argv
                 if (URL of candidate as text) is targetUrl then
                     close candidate
                     set closedCount to closedCount + 1
+                    exit repeat
                 end if
             end try
         end repeat
     end tell
     return closedCount as text
+end run
+"""
+    _OPEN_NEW_DOCUMENT_SCRIPT = """
+on run argv
+    set targetUrl to item 1 of argv
+    tell application "Safari"
+        make new document with properties {URL:targetUrl}
+    end tell
+    return ""
 end run
 """
 
@@ -571,44 +775,115 @@ end run
             raise BrowserSurfaceUnavailable("macOS is required for the real-surface smoke")
         if not Path("/Applications/Safari.app").exists():
             raise BrowserSurfaceUnavailable("Safari.app is unavailable")
-        if not Path("/usr/bin/osascript").exists() or not Path("/usr/bin/open").exists():
-            raise BrowserSurfaceUnavailable("required macOS stdlib launch tools are unavailable")
+        if not Path("/usr/bin/osascript").exists():
+            raise BrowserSurfaceUnavailable("required macOS scripting tool is unavailable")
+        self._temporary_directory: TemporaryDirectory[str] | None = None
+        self._wrapper_path: Path | None = None
+
+    def __enter__(self) -> SafariSurfaceController:
+        self._temporary_directory = TemporaryDirectory(
+            prefix="colorluthier-safari-surface-"
+        )
+        wrapper = Path(self._temporary_directory.name) / "open-new-safari-document"
+        wrapper.write_text(
+            f"""#!{sys.executable}
+import subprocess
+import sys
+
+SCRIPT = {self._OPEN_NEW_DOCUMENT_SCRIPT!r}
+
+if len(sys.argv) != 2:
+    raise SystemExit(2)
+try:
+    completed = subprocess.run(
+        ("/usr/bin/osascript", "-e", SCRIPT, sys.argv[1]),
+        check=False,
+        capture_output=True,
+        timeout={_APPLE_EVENT_TIMEOUT_SECONDS!r},
+    )
+except subprocess.TimeoutExpired:
+    raise SystemExit(3)
+raise SystemExit(completed.returncode)
+""",
+            encoding="utf-8",
+        )
+        wrapper.chmod(0o700)
+        self._wrapper_path = wrapper
+        return self
+
+    def __exit__(self, exception_type, exception, traceback) -> None:
+        self._wrapper_path = None
+        if self._temporary_directory is not None:
+            self._temporary_directory.cleanup()
+            self._temporary_directory = None
+
+    @property
+    def wrapper_path(self) -> Path:
+        if self._wrapper_path is None:
+            raise RuntimeError("Safari surface controller is not active")
+        return self._wrapper_path
 
     @property
     def browser_environment(self) -> dict[str, str]:
-        return {"BROWSER": "/usr/bin/open -a Safari %s"}
+        return {"BROWSER": f"{shlex.quote(str(self.wrapper_path))} %s"}
 
-    def wait_for_exact_url(self, url: str) -> int:
-        last_count = 0
+    def inventory(self) -> tuple[str, ...]:
+        serialized = self._run_script(self._INVENTORY_SCRIPT)
+        if not serialized:
+            return ()
+        return tuple(sorted(serialized.split(chr(30))))
+
+    def wait_for_added_document(
+        self,
+        before: tuple[str, ...],
+        url: str,
+    ) -> tuple[str, ...]:
+        expected = tuple(sorted((*before, url)))
+        last_inventory: tuple[str, ...] = ()
         for _ in range(_APPLE_EVENT_ATTEMPTS):
-            last_count = self.count_exact_url(url)
-            if last_count > 0:
-                return last_count
+            try:
+                last_inventory = self.inventory()
+            except BrowserSurfaceUnavailable as error:
+                raise BrowserSurfaceUnavailable(
+                    f"Safari inventory failed; residual URL {url}"
+                ) from error
+            if last_inventory == expected:
+                return last_inventory
         raise BrowserSurfaceUnavailable(
-            f"Safari never exposed the exact prototype URL; final count={last_count}"
+            "Safari did not add exactly one isolated document; "
+            f"residual URL {url}; before={before!r}; current={last_inventory!r}"
         )
 
-    def wait_until_closed(self, url: str) -> None:
-        last_count = -1
+    def wait_for_inventory(
+        self,
+        expected: tuple[str, ...],
+        *,
+        residual_url: str,
+    ) -> None:
+        last_inventory: tuple[str, ...] = ()
         for _ in range(_APPLE_EVENT_ATTEMPTS):
-            last_count = self.count_exact_url(url)
-            if last_count == 0:
+            try:
+                last_inventory = self.inventory()
+            except BrowserSurfaceUnavailable as error:
+                raise BrowserSurfaceUnavailable(
+                    f"Safari inventory failed; residual URL {residual_url}"
+                ) from error
+            if last_inventory == expected:
                 return
         raise BrowserSurfaceUnavailable(
-            f"Safari retained the exact prototype URL; final count={last_count}"
+            "Safari did not restore the original document multiset; "
+            f"residual URL {residual_url}; "
+            f"expected={expected!r}; current={last_inventory!r}"
         )
-
-    def count_exact_url(self, url: str) -> int:
-        return int(self._run_script(self._COUNT_SCRIPT, url))
 
     def close_exact_url(self, url: str) -> int:
         return int(self._run_script(self._CLOSE_SCRIPT, url))
 
     @staticmethod
-    def _run_script(script: str, url: str) -> str:
+    def _run_script(script: str, *arguments: str) -> str:
         try:
             completed = subprocess.run(
-                ("/usr/bin/osascript", "-e", script, url),
+                ("/usr/bin/osascript", "-e", script, *arguments),
                 check=False,
                 capture_output=True,
                 text=True,

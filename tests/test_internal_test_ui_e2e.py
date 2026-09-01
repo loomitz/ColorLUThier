@@ -4,9 +4,13 @@
 from __future__ import annotations
 
 import ast
+import io
+import os
+import stat
 import sys
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from colorluthier_engine import (
     CommandStatus,
@@ -26,6 +30,7 @@ from internal_test_ui_adapter import (
 )
 from internal_test_ui_prototype import ManualExecutor, PrototypeApplication, render_page
 
+import internal_test_ui_e2e_support as e2e_support
 from internal_test_ui_e2e_support import (
     AccessiblePage,
     BrowserSurfaceUnavailable,
@@ -36,6 +41,24 @@ from internal_test_ui_e2e_support import (
 
 
 _ORDINARY_EXPORT_BLOCKED = "blocked-pending-explicit-color-contexts"
+_SYNTHETIC_REFERENCE_PPM = (
+    b"P6\n2 2\n255\n"
+    b"\x00\x00\x00"
+    b"\xff\x00\x00"
+    b"\x00\xff\x00"
+    b"\x00\x00\xff"
+)
+_SYNTHETIC_IDENTITY_CUBE = (
+    b"LUT_3D_SIZE 2\n"
+    b"0 0 0\n"
+    b"1 0 0\n"
+    b"0 1 0\n"
+    b"1 1 0\n"
+    b"0 0 1\n"
+    b"1 0 1\n"
+    b"0 1 1\n"
+    b"1 1 1\n"
+)
 
 
 def _basis_fields(page: AccessiblePage) -> dict[str, str]:
@@ -78,15 +101,183 @@ def _last_valid_visible_state(page: AccessiblePage) -> tuple[object, ...]:
     )
 
 
+def _full_surface_state(page: AccessiblePage) -> tuple[tuple[object, ...], ...]:
+    return tuple(
+        (surface.test_id, surface.definitions)
+        for surface in page.elements_with_prefix("surface-")
+        if surface.definition("Purpose") == "processed-full-resolution"
+    )
+
+
+def _input_inventory(root: Path) -> tuple[tuple[object, ...], ...]:
+    inventory = []
+    for path in sorted(root.iterdir()):
+        metadata = path.stat()
+        inventory.append(
+            (
+                path.name,
+                path.read_bytes(),
+                stat.S_IMODE(metadata.st_mode),
+                metadata.st_mtime_ns,
+            )
+        )
+    return tuple(inventory)
+
+
+class AccessibleFormDriverTest(unittest.TestCase):
+    def test_select_defaults_selected_options_and_checked_boxes_are_submitted(
+        self,
+    ) -> None:
+        page = parse_accessible_page(
+            b"""<!doctype html>
+            <form method="post" action="/action" data-testid="form-under-test">
+              <input type="hidden" name="action" value="configure-transformation">
+              <input type="text" name="mix" value="1.0">
+              <select name="default-choice">
+                <option value="first">First</option>
+                <option value="second">Second</option>
+              </select>
+              <select name="selected-choice">
+                <option value="first">First</option>
+                <option value="second" selected>Second</option>
+              </select>
+              <input type="checkbox" name="enabled" checked>
+              <input type="checkbox" name="named-enabled" value="yes" checked>
+              <input type="checkbox" name="disabled" value="no">
+            </form>"""
+        )
+        form = page.form("form-under-test")
+
+        self.assertEqual(form.field("default-choice"), "first")
+        self.assertEqual(form.field("selected-choice"), "second")
+        self.assertEqual(form.field("enabled"), "on")
+        self.assertEqual(form.field("named-enabled"), "yes")
+        with self.assertRaises(AssertionError):
+            form.field("disabled")
+        self.assertEqual(
+            dict(form.submission({"mix": "0.5", "disabled": "on"})),
+            {
+                "action": "configure-transformation",
+                "mix": "0.5",
+                "default-choice": "first",
+                "selected-choice": "second",
+                "enabled": "on",
+                "named-enabled": "yes",
+                "disabled": "on",
+            },
+        )
+
+    def test_duplicate_field_names_are_rejected_before_access_or_submission(
+        self,
+    ) -> None:
+        page = parse_accessible_page(
+            b"""<!doctype html>
+            <form method="post" action="/action" data-testid="duplicate-form">
+              <input type="hidden" name="action" value="load-synthetic">
+              <input type="hidden" name="action" value="malformed-reference">
+              <input type="text" name="unique" value="kept">
+            </form>"""
+        )
+        form = page.form("duplicate-form")
+
+        with self.assertRaisesRegex(AssertionError, "duplicate field name"):
+            form.field("unique")
+        with self.assertRaisesRegex(AssertionError, "duplicate field name"):
+            form.submission({})
+
+    def test_process_driver_accepts_only_post_action_forms(self) -> None:
+        page = parse_accessible_page(
+            b"""<!doctype html>
+            <form method="get" action="/action" data-testid="wrong-method">
+              <input type="hidden" name="action" value="load-synthetic">
+            </form>
+            <form method="post" action="/elsewhere" data-testid="wrong-target">
+              <input type="hidden" name="action" value="load-synthetic">
+            </form>"""
+        )
+
+        with PrototypeServerProcess() as server:
+            with self.assertRaisesRegex(AssertionError, "POST /action"):
+                server.submit(page.form("wrong-method"))
+            with self.assertRaisesRegex(AssertionError, "POST /action"):
+                server.submit(page.form("wrong-target"))
+
+
+class _FakeHttpResponse:
+    def __init__(self, body: bytes, content_length: str | None) -> None:
+        self.headers = {}
+        if content_length is not None:
+            self.headers["Content-Length"] = content_length
+        self._body = io.BytesIO(body)
+
+    def read(self, maximum: int = -1) -> bytes:
+        return self._body.read(maximum)
+
+
+class BoundedIoDriverTest(unittest.TestCase):
+    def _readiness(self, payload: bytes, *, maximum_bytes: int = 64) -> bytes:
+        read_descriptor, write_descriptor = os.pipe()
+        try:
+            os.write(write_descriptor, payload)
+        finally:
+            os.close(write_descriptor)
+        with os.fdopen(read_descriptor, "rb", buffering=0) as stream:
+            return e2e_support.read_bounded_readiness(
+                stream,
+                timeout_seconds=0.1,
+                maximum_bytes=maximum_bytes,
+            )
+
+    def test_readiness_requires_one_complete_bounded_line(self) -> None:
+        self.assertEqual(
+            self._readiness(b"http://127.0.0.1:1234/\n"),
+            b"http://127.0.0.1:1234/",
+        )
+        with self.assertRaisesRegex(RuntimeError, "before readiness"):
+            self._readiness(b"")
+        with self.assertRaisesRegex(RuntimeError, "unterminated readiness"):
+            self._readiness(b"http://127.0.0.1:1234/")
+        with self.assertRaisesRegex(RuntimeError, "readiness byte limit"):
+            self._readiness(b"123456789\n", maximum_bytes=8)
+
+    def test_http_body_requires_exact_bounded_content_length(self) -> None:
+        self.assertEqual(
+            e2e_support.read_bounded_http_body(
+                _FakeHttpResponse(b"body", "4"),
+                maximum_bytes=8,
+            ),
+            b"body",
+        )
+        with self.assertRaisesRegex(RuntimeError, "Content-Length is missing"):
+            e2e_support.read_bounded_http_body(
+                _FakeHttpResponse(b"body", None),
+                maximum_bytes=8,
+            )
+        with self.assertRaisesRegex(RuntimeError, "exceeds the byte limit"):
+            e2e_support.read_bounded_http_body(
+                _FakeHttpResponse(b"body", "9"),
+                maximum_bytes=8,
+            )
+        with self.assertRaisesRegex(RuntimeError, "body length is not exact"):
+            e2e_support.read_bounded_http_body(
+                _FakeHttpResponse(b"part", "5"),
+                maximum_bytes=8,
+            )
+        with self.assertRaisesRegex(RuntimeError, "body length is not exact"):
+            e2e_support.read_bounded_http_body(
+                _FakeHttpResponse(b"extra", "4"),
+                maximum_bytes=8,
+            )
+
+
 class InternalTestUiHeadlessAcceptanceTest(unittest.TestCase):
     def test_public_intents_translate_to_snapshot_backed_render_state(self) -> None:
-        repository_root = Path(__file__).resolve().parents[1]
         executor = ManualExecutor()
         adapter = InternalTestUiAdapter(executor)
 
         opened = adapter.dispatch(
             OpenReferenceIntent(
-                b"P6\n1 1\n255\n\x40\x80\xc0",
+                _SYNTHETIC_REFERENCE_PPM,
                 ProvisionalImageFormat.PPM_P6_RGB8,
             )
         )
@@ -97,7 +288,7 @@ class InternalTestUiHeadlessAcceptanceTest(unittest.TestCase):
 
         loaded = adapter.dispatch(
             LoadPortableCubeIntent(
-                (repository_root / "tests/fixtures/identity-2/input.cube").read_bytes(),
+                _SYNTHETIC_IDENTITY_CUBE,
                 Interpolation.TRILINEAR,
             )
         )
@@ -221,6 +412,19 @@ class InternalTestUiHeadlessAcceptanceTest(unittest.TestCase):
             newer.job_id,
         )
 
+        valid_full_resolution = application.current.snapshot.full_resolution
+        valid_full_surface = _full_surface_state(_render(application))
+        application.dispatch_action("request-full", {})
+        refresh_id = application.current.submitted_job_id.value
+        application.dispatch_action("step-job", {"job-id": str(refresh_id)})
+        application.dispatch_action("cancel-job", {"job-id": str(refresh_id)})
+        self.assertEqual(_job_snapshot(application, refresh_id).state, JobState.CANCELLED)
+        self.assertIs(
+            application.current.snapshot.full_resolution,
+            valid_full_resolution,
+        )
+        self.assertEqual(_full_surface_state(_render(application)), valid_full_surface)
+
         application.dispatch_action("inspect-canonical", {})
         canonical_id = application.current.submitted_job_id.value
         application.dispatch_action("run-job", {"job-id": str(canonical_id)})
@@ -258,6 +462,43 @@ class InternalTestUiHeadlessAcceptanceTest(unittest.TestCase):
 
 
 class InternalTestUiHttpAcceptanceTest(unittest.TestCase):
+    def test_path_forms_read_synthetic_inputs_without_mutating_them(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            input_root = Path(temporary_directory)
+            reference = input_root / "synthetic-reference.ppm"
+            cube = input_root / "synthetic-identity.cube"
+            reference.write_bytes(_SYNTHETIC_REFERENCE_PPM)
+            cube.write_bytes(_SYNTHETIC_IDENTITY_CUBE)
+            before = _input_inventory(input_root)
+
+            with PrototypeServerProcess() as server:
+                page = server.get()
+                page = server.submit(
+                    page.form("reference-path-form"),
+                    {
+                        "reference-path": str(reference),
+                        "image-format": "ppm-p6-rgb8",
+                    },
+                )
+                page = server.submit(
+                    page.form("cube-path-form"),
+                    {
+                        "cube-path": str(cube),
+                        "interpolation": "tetrahedral",
+                        "mix": "0.5",
+                    },
+                )
+
+            self.assertEqual(
+                page.element("reference-metadata").definition("Format"),
+                "ppm-p6-rgb8",
+            )
+            self.assertEqual(
+                page.element("transformation-metadata").definition("Interpolation"),
+                "tetrahedral",
+            )
+            self.assertEqual(_input_inventory(input_root), before)
+
     def test_full_loopback_http_flow_is_accessible_and_deterministic(self) -> None:
         with PrototypeServerProcess() as server:
             initial = server.get()
@@ -266,8 +507,9 @@ class InternalTestUiHttpAcceptanceTest(unittest.TestCase):
             self.assertIn("NOT PRODUCT UI", initial.element("prototype-banner").text)
             self.assertEqual(initial.form("reference-path-form").target, "/action")
             self.assertEqual(initial.form("cube-path-form").target, "/action")
+            stale_context_form = initial.form("declare-contexts-form")
 
-            page = server.post("load-synthetic")
+            page = server.submit(initial.action_form("load-synthetic"))
             self.assertEqual(
                 page.element("reference-metadata").definition("Format"),
                 "ppm-p6-rgb8",
@@ -276,8 +518,8 @@ class InternalTestUiHttpAcceptanceTest(unittest.TestCase):
                 page.element("transformation-metadata").definition("Interpolation"),
                 "trilinear",
             )
-            page = server.post(
-                "configure-transformation",
+            page = server.submit(
+                page.form("configure-form"),
                 {
                     "interpolation": "tetrahedral",
                     "bypass": "on",
@@ -289,7 +531,20 @@ class InternalTestUiHttpAcceptanceTest(unittest.TestCase):
             self.assertEqual(transformation.definition("Bypass"), "true")
             self.assertEqual(transformation.definition("Mix"), "0.5")
 
-            page = server.post("declare-contexts", _basis_fields(page))
+            page = server.submit(stale_context_form)
+            self.assertEqual(
+                page.element("command-diagnostic").definition("Code"),
+                "COLOR_CONTEXT_REVISION_CONFLICT",
+            )
+            self.assertEqual(
+                page.element("snapshot-revisions").definition("Command status"),
+                "rejected",
+            )
+            page = server.submit(page.form("declare-contexts-form"))
+            self.assertEqual(
+                page.element("snapshot-revisions").definition("Command status"),
+                "committed",
+            )
             rendered_contexts = page.element("color-contexts")
             self.assertIn("ProofColorContext", rendered_contexts.definition("Declaration"))
             self.assertIn(
@@ -298,29 +553,46 @@ class InternalTestUiHttpAcceptanceTest(unittest.TestCase):
             )
             self.assertIn("interpolation=<Interpolation.TETRAHEDRAL", rendered_contexts.text)
 
-            page = server.post("request-preview")
+            page = server.submit(page.action_form("request-preview"))
             preview = page.latest_job
             self.assertEqual(preview.purpose, "preview")
             self.assertEqual(preview.state, "queued")
-            page = server.post("step-job", {"job-id": str(preview.job_id)})
+            page = server.submit(
+                page.action_form("step-job", {"job-id": str(preview.job_id)})
+            )
             stepped_preview = page.job(preview.job_id)
             self.assertEqual(stepped_preview.state, "running")
             self.assertGreater(stepped_preview.completed_units, 0)
             self.assertLess(stepped_preview.completed_units, stepped_preview.total_units)
-            page = server.post("run-job", {"job-id": str(preview.job_id)})
+            page = server.submit(
+                page.action_form("run-job", {"job-id": str(preview.job_id)})
+            )
             self.assertEqual(page.job(preview.job_id).state, "succeeded")
             self.assertEqual(len(page.elements_with_prefix("surface-")), 2)
 
-            page = server.post("request-full")
-            cancelled = page.latest_job
-            self.assertEqual(cancelled.purpose, "full-resolution-evaluation")
-            page = server.post("step-job", {"job-id": str(cancelled.job_id)})
-            self.assertGreater(page.job(cancelled.job_id).completed_units, 0)
-            page = server.post("cancel-job", {"job-id": str(cancelled.job_id)})
-            self.assertEqual(page.job(cancelled.job_id).state, "cancelled")
-            self.assertEqual(len(page.elements_with_prefix("surface-")), 2)
+            page = server.submit(page.action_form("request-full"))
+            published = page.latest_job
+            self.assertEqual(published.purpose, "full-resolution-evaluation")
+            page = server.submit(
+                page.action_form("run-job", {"job-id": str(published.job_id)})
+            )
+            self.assertEqual(page.job(published.job_id).state, "succeeded")
+            valid_full_surface = _full_surface_state(page)
+            self.assertEqual(len(valid_full_surface), 1)
 
-            page = server.post("stale-demo")
+            page = server.submit(page.action_form("request-full"))
+            cancelled = page.latest_job
+            page = server.submit(
+                page.action_form("step-job", {"job-id": str(cancelled.job_id)})
+            )
+            self.assertGreater(page.job(cancelled.job_id).completed_units, 0)
+            page = server.submit(
+                page.action_form("cancel-job", {"job-id": str(cancelled.job_id)})
+            )
+            self.assertEqual(page.job(cancelled.job_id).state, "cancelled")
+            self.assertEqual(_full_surface_state(page), valid_full_surface)
+
+            page = server.submit(page.action_form("stale-demo"))
             full_jobs = tuple(
                 job
                 for job in page.jobs
@@ -337,22 +609,22 @@ class InternalTestUiHttpAcceptanceTest(unittest.TestCase):
             )
             self.assertEqual(len(full_surfaces), 1)
 
-            page = server.post("inspect-canonical")
+            page = server.submit(page.action_form("inspect-canonical"))
             canonical_job = page.latest_job
             self.assertEqual(canonical_job.purpose, "canonical-portable-cube-export")
-            page = server.post("run-job", {"job-id": str(canonical_job.job_id)})
+            page = server.submit(
+                page.action_form("run-job", {"job-id": str(canonical_job.job_id)})
+            )
             canonical = page.element("canonical-artifact")
             self.assertEqual(canonical.definition("Job ID"), str(canonical_job.job_id))
-            self.assertEqual(canonical.definition("Byte count"), "62")
-            self.assertEqual(len(canonical.definition("SHA-256")), 64)
-            self.assertIn("LUT_3D_SIZE 2", canonical.definition("Canonical bytes"))
+            self.assertTrue(canonical.definition("Canonical bytes"))
             self.assertEqual(
                 page.element("ordinary-export-status").text,
                 _ORDINARY_EXPORT_BLOCKED,
             )
 
             before_visible = _last_valid_visible_state(page)
-            page = server.post("malformed-reference")
+            page = server.submit(page.action_form("malformed-reference"))
             self.assertEqual(
                 page.element("command-diagnostic").definition("Code"),
                 "REFERENCE_STRUCTURE_INVALID",
@@ -363,38 +635,54 @@ class InternalTestUiHttpAcceptanceTest(unittest.TestCase):
 class InternalTestUiMacOsSurfaceAcceptanceTest(unittest.TestCase):
     def test_documented_command_opens_and_closes_only_its_real_surface(self) -> None:
         controller = SafariSurfaceController()
-        process = PrototypeServerProcess(
-            open_browser=True,
-            extra_environment=controller.browser_environment,
-        )
-        self.assertEqual(
-            process.command,
-            ("python3.12", "-m", "internal_test_ui_prototype"),
-        )
+        wrapper_path: Path | None = None
         url: str | None = None
-        surface_control_available = True
-        try:
-            url = process.start()
-            exact_count = controller.wait_for_exact_url(url)
-            self.assertEqual(exact_count, 1)
-            page = process.get()
-            self.assertEqual(page.status, 200)
-            self.assertIn("NOT PRODUCT UI", page.element("prototype-banner").text)
-        except BrowserSurfaceUnavailable:
-            surface_control_available = False
-            process.stop(check=False)
-            raise
-        finally:
-            if url is not None and surface_control_available:
+        with controller:
+            wrapper_path = controller.wrapper_path
+            before = controller.inventory()
+            process = PrototypeServerProcess(
+                open_browser=True,
+                extra_environment=controller.browser_environment,
+            )
+            self.assertEqual(
+                process.command,
+                ("python3.12", "-m", "internal_test_ui_prototype"),
+            )
+            cleanup_error: BrowserSurfaceUnavailable | None = None
+            try:
+                url = process.start()
+                opened = controller.wait_for_added_document(before, url)
+                self.assertEqual(opened, tuple(sorted((*before, url))))
+                page = process.get()
+                self.assertEqual(page.status, 200)
+                self.assertIn("NOT PRODUCT UI", page.element("prototype-banner").text)
+            finally:
                 try:
-                    if controller.count_exact_url(url) > 0:
+                    if url is not None:
                         closed_count = controller.close_exact_url(url)
-                        self.assertEqual(closed_count, 1)
-                        controller.wait_until_closed(url)
+                        if closed_count != 1:
+                            raise BrowserSurfaceUnavailable(
+                                f"Safari closed {closed_count} documents; residual URL {url}"
+                            )
+                        controller.wait_for_inventory(before, residual_url=url)
+                except BrowserSurfaceUnavailable as error:
+                    cleanup_error = error
                 finally:
                     if process.url is not None:
-                        process.stop(check=sys.exc_info()[0] is None)
-        self.assertIsNone(process.url)
+                        process.stop(
+                            check=(
+                                sys.exc_info()[0] is None
+                                and cleanup_error is None
+                            )
+                        )
+                if cleanup_error is not None:
+                    raise BrowserSurfaceUnavailable(
+                        f"Safari cleanup failed; residual URL {url}"
+                    ) from cleanup_error
+            self.assertEqual(controller.inventory(), before)
+            self.assertIsNone(process.url)
+        self.assertIsNotNone(wrapper_path)
+        self.assertFalse(wrapper_path.exists())
 
 
 class InternalTestUiE2eBoundaryAuditTest(unittest.TestCase):

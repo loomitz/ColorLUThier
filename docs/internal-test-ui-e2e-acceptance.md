@@ -4,6 +4,11 @@ This acceptance slice tests the disposable Internal Test UI as an external
 operator would encounter it. It does not add production behavior, choose a
 permanent UI toolkit, or claim product readiness.
 
+Issue #57 owns acceptance code only. If a test exposes a production defect,
+create a blocking child bug with the smallest sanitized public reproduction:
+the exact command or rendered-form action, bounded non-private input, diagnostic
+code, expected result, and actual result. Do not fix production from #57.
+
 The tests use only Python's standard library and public ColorLUThier packages.
 They do not import engine internals, the Portable Cube harness, test-only
 executors from the engine, or the prototype's private modules. They create no
@@ -19,11 +24,8 @@ python3.12 -m internal_test_ui_prototype
 
 The command binds only to `127.0.0.1`, chooses an ephemeral port by default,
 prints the exact URL to stdout, and opens it with the standard-library browser
-launcher. Stop it with Control-C. For a headless manual launch, use:
-
-```console
-python3.12 -m internal_test_ui_prototype --no-open
-```
+launcher. Stop it with Control-C. The test driver adds `--no-open` when it owns
+a headless subprocess.
 
 ## Acceptance commands
 
@@ -31,12 +33,6 @@ Run the headless intent-to-snapshot-to-render acceptance only:
 
 ```console
 PYTHONDONTWRITEBYTECODE=1 python3.12 -m unittest discover -s tests -p 'test_internal_test_ui_e2e.py' -k Headless -v
-```
-
-Run the real loopback HTTP acceptance only:
-
-```console
-PYTHONDONTWRITEBYTECODE=1 python3.12 -m unittest discover -s tests -p 'test_internal_test_ui_e2e.py' -k Http -v
 ```
 
 Run the macOS real-surface smoke only:
@@ -51,12 +47,6 @@ Run the complete issue #57 acceptance slice:
 PYTHONDONTWRITEBYTECODE=1 python3.12 -m unittest discover -s tests -p 'test_internal_test_ui_e2e.py' -v
 ```
 
-Run the complete repository suite:
-
-```console
-PYTHONDONTWRITEBYTECODE=1 python3.12 -m unittest discover -s tests -v
-```
-
 ## What is accepted
 
 The headless and HTTP paths independently exercise these public behaviors:
@@ -66,8 +56,11 @@ The headless and HTTP paths independently exercise these public behaviors:
 - A complete color-context declaration submitted with all three hidden expected
   revisions, including an explicit Export color context independent of Proof
   and Display.
+- Rejection of a stale rendered declaration basis followed by a committed
+  submission from the newly rendered form.
 - Preview submission, visible scanline progress, and terminal publication.
-- Full-resolution progress and cancellation without partial publication.
+- Full-resolution progress and cancellation without partial publication or
+  replacement of the last valid full-resolution result.
 - Newest-before-oldest completion, with the older job visibly stale and the
   newest valid full-resolution result retained.
 - Canonical Portable Cube inspection while ordinary export remains explicitly
@@ -78,23 +71,31 @@ The headless and HTTP paths independently exercise these public behaviors:
 
 The HTML parser observes forms, hidden revision-basis fields, stable
 `data-testid` regions, job states, and progress attributes. It does not infer
-domain state from pixels or duplicate any color arithmetic.
+domain state from pixels or duplicate any color arithmetic. HTTP actions are
+submitted from those rendered forms, including select defaults, selected
+options, and checked checkboxes; duplicate field names fail closed. Readiness
+and HTTP bodies require bounded, exact framing. Local-path coverage reads only
+synthetic inputs in a temporary directory and verifies their names, bytes,
+permissions, and modification times remain unchanged.
 
 ## macOS surface contract
 
-The smoke runs the documented start command without `--no-open`. It forces the
-standard-library browser launcher to open Safari, waits boundedly until Safari
-reports exactly the printed ephemeral URL, requests that live server once, and
-closes only the Safari document whose URL is exactly equal to that URL. It never
-quits Safari or closes unrelated windows or tabs, and it does not rely on a
-pre-existing tab.
+The smoke runs the documented start command without `--no-open`. Its temporary
+standard-library `BROWSER` wrapper asks Safari to create a new document for the
+printed ephemeral URL; it never navigates or reuses an existing document. The
+test inventories the complete multiset of Safari document URLs before launch,
+requires the launch inventory to equal that multiset plus exactly the ephemeral
+URL, requests the live server once, closes only that exact document, and
+requires the original multiset to be restored. It never quits Safari or closes
+unrelated windows or tabs. The wrapper is removed with its temporary directory.
 
-The macOS host must provide `/Applications/Safari.app`, `/usr/bin/open`, and
+The macOS host must provide `/Applications/Safari.app` and
 `/usr/bin/osascript`, and its existing automation policy must permit the exact
 window query and close operation. The test never grants or changes permissions.
 A non-macOS host, an Apple Events denial, a prompt, or a timeout is a failing
 environmental gate rather than a skipped success. The headless and HTTP helper
-paths themselves remain portable.
+paths themselves remain portable. A control failure reports the exact residual
+URL, stops the server, preserves every other Safari document, and remains RED.
 
 ## Deliberate limits
 

@@ -8,6 +8,16 @@ from collections.abc import Generator
 from dataclasses import dataclass, replace
 from typing import Any
 
+from ._limits import (
+    DOCUMENT_JOB_HISTORY_LIMIT,
+    DOCUMENT_MAX_ACTIVE_JOBS,
+    DOCUMENT_MAX_QUEUED_WORK_UNITS,
+    FULL_RESOLUTION_BYTES_PER_PIXEL,
+    FULL_RESOLUTION_MAX_OUTPUT_BYTES,
+    FULL_RESOLUTION_MAX_PIXELS,
+    FULL_RESOLUTION_MAX_SCRATCH_BYTES,
+    FULL_RESOLUTION_RETAINED_RESULTS,
+)
 from ._image_source import (
     DecodedImage,
     ImageSource,
@@ -17,10 +27,13 @@ from ._image_source import (
 from ._portable_cube import PortableCube, PortableCubeError, parse_portable_cube
 from ._processing import (
     ExportCandidate,
+    FullResolutionCandidate,
     PreviewCandidate,
     ProcessingError,
     export_plan,
     export_total_units,
+    full_resolution_plan,
+    full_resolution_total_units,
     preview_plan,
     preview_total_units,
 )
@@ -45,6 +58,7 @@ from .model import (
     DocumentRevision,
     DocumentSnapshot,
     ExportRevision,
+    FullResolutionResult,
     Interpolation,
     InterpretationRevision,
     JobId,
@@ -58,6 +72,7 @@ from .model import (
     ProvisionalImageFormat,
     ReferenceImageSnapshot,
     RequestCanonicalPortableCubeExport,
+    RequestFullResolutionEvaluation,
     RequestPreview,
     RevisionBasis,
     SnapshotRevision,
@@ -72,8 +87,6 @@ from .model import (
 )
 
 
-_MAX_ACTIVE_JOBS = 4
-_JOB_HISTORY_LIMIT = 128
 _TERMINAL_JOB_STATES = frozenset(
     {
         JobState.SUCCEEDED,
@@ -87,6 +100,8 @@ _PROVISIONAL_BEHAVIORS = (
     "Reference-image color context is unknown and preview surfaces are unmanaged.",
     "Preview pixels are deterministic big-endian RGB binary32 values without "
     "display conversion.",
+    "Full-resolution evaluation is bounded source-resolution CPU evidence "
+    "without Proof or Display conversion.",
     "Canonical Cube artifacts are imported-lattice inspection data; ordinary "
     "color-managed export remains blocked.",
 )
@@ -119,6 +134,7 @@ class _DocumentState:
     reference: _ReferenceState | None
     transformation: _TransformationState | None
     preview: PreviewBundle | None
+    full_resolution: FullResolutionResult | None
     canonical_cube_export: CanonicalPortableCubeArtifact | None
     color_contexts: ColorContextsSnapshot
 
@@ -130,7 +146,11 @@ class _JobRecord:
     basis: RevisionBasis
     state: JobState
     progress: Progress
-    plan: Generator[int, None, PreviewCandidate | ExportCandidate]
+    plan: Generator[
+        int,
+        None,
+        PreviewCandidate | FullResolutionCandidate | ExportCandidate,
+    ]
     diagnostic: Diagnostic | None = None
 
 
@@ -156,6 +176,7 @@ class ColorDocument:
             reference=None,
             transformation=None,
             preview=None,
+            full_resolution=None,
             canonical_cube_export=None,
             color_contexts=_INITIAL_COLOR_CONTEXTS,
         )
@@ -179,6 +200,8 @@ class ColorDocument:
             return self._declare_color_contexts(command)
         if isinstance(command, RequestPreview):
             return self._request_preview()
+        if isinstance(command, RequestFullResolutionEvaluation):
+            return self._request_full_resolution_evaluation()
         if isinstance(command, RequestCanonicalPortableCubeExport):
             return self._request_canonical_cube_export()
         if isinstance(command, CancelJob):
@@ -203,6 +226,7 @@ class ColorDocument:
                 else self._state.transformation.public
             ),
             preview=self._state.preview,
+            full_resolution=self._state.full_resolution,
             canonical_cube_export=self._state.canonical_cube_export,
             color_contexts=self._state.color_contexts,
             jobs=tuple(self._job_snapshot(record) for record in self._jobs.values()),
@@ -268,6 +292,7 @@ class ColorDocument:
                 original_encoded=command.encoded,
             ),
             preview=None,
+            full_resolution=None,
             color_contexts=replace(
                 self._state.color_contexts,
                 interpretation_revision=InterpretationRevision(
@@ -323,6 +348,7 @@ class ColorDocument:
             revision=document_revision,
             transformation=_TransformationState(public=public, cube=cube),
             preview=None,
+            full_resolution=None,
             canonical_cube_export=None,
         )
         self._touch()
@@ -381,6 +407,7 @@ class ColorDocument:
             revision=self._next_document_revision(),
             transformation=_TransformationState(public=public, cube=current.cube),
             preview=None,
+            full_resolution=None,
             canonical_cube_export=None,
         )
         self._touch()
@@ -472,6 +499,11 @@ class ColorDocument:
                 if interpretation_changed or viewing_changed
                 else self._state.preview
             ),
+            full_resolution=(
+                None
+                if interpretation_changed
+                else self._state.full_resolution
+            ),
             color_contexts=color_contexts,
         )
         self._touch()
@@ -517,6 +549,43 @@ class ColorDocument:
             total_units=export_total_units(transformation.cube),
         )
 
+    def _request_full_resolution_evaluation(self) -> CommandResult:
+        reference = self._state.reference
+        transformation = self._state.transformation
+        if reference is None or transformation is None:
+            missing = "reference image" if reference is None else "transformation"
+            return self._rejected(
+                "FULL_RESOLUTION_PREREQUISITE_MISSING",
+                f"A {missing} must be loaded before requesting full-resolution "
+                "evaluation.",
+                (("missing", missing),),
+            )
+
+        if not self._full_resolution_storage_is_admissible(reference.decoded):
+            return self._rejected(
+                "FULL_RESOLUTION_RESOURCE_LIMIT",
+                "The Reference image exceeds the provisional full-resolution "
+                "storage limits.",
+                (
+                    ("maximum_pixels", FULL_RESOLUTION_MAX_PIXELS),
+                    ("maximum_output_bytes", FULL_RESOLUTION_MAX_OUTPUT_BYTES),
+                    ("maximum_scratch_bytes", FULL_RESOLUTION_MAX_SCRATCH_BYTES),
+                ),
+            )
+
+        plan = full_resolution_plan(
+            reference=reference.decoded,
+            cube=transformation.cube,
+            interpolation=transformation.public.interpolation.value,
+            bypass=transformation.public.bypass,
+            mix=transformation.public.mix,
+        )
+        return self._submit_job(
+            purpose=JobPurpose.FULL_RESOLUTION_EVALUATION,
+            plan=plan,
+            total_units=full_resolution_total_units(reference.decoded),
+        )
+
     def _cancel_job(self, command: CancelJob) -> CommandResult:
         if not isinstance(command.job_id, JobId):
             return self._rejected(
@@ -560,18 +629,36 @@ class ColorDocument:
         self,
         *,
         purpose: JobPurpose,
-        plan: Generator[int, None, PreviewCandidate | ExportCandidate],
+        plan: Generator[
+            int,
+            None,
+            PreviewCandidate | FullResolutionCandidate | ExportCandidate,
+        ],
         total_units: int,
     ) -> CommandResult:
         active_count = sum(
             record.state not in _TERMINAL_JOB_STATES
             for record in self._jobs.values()
         )
-        if active_count >= _MAX_ACTIVE_JOBS:
+        if active_count >= DOCUMENT_MAX_ACTIVE_JOBS:
+            plan.close()
             return self._rejected(
                 "JOB_CAPACITY_EXHAUSTED",
                 "The document already has the maximum number of active jobs.",
-                (("maximum", _MAX_ACTIVE_JOBS),),
+                (("maximum", DOCUMENT_MAX_ACTIVE_JOBS),),
+            )
+
+        queued_work_units = sum(
+            record.progress.total_units - record.progress.completed_units
+            for record in self._jobs.values()
+            if record.state not in _TERMINAL_JOB_STATES
+        )
+        if total_units > DOCUMENT_MAX_QUEUED_WORK_UNITS - queued_work_units:
+            plan.close()
+            return self._rejected(
+                "JOB_WORK_CAPACITY_EXHAUSTED",
+                "The document cannot admit more queued work units.",
+                (("maximum_units", DOCUMENT_MAX_QUEUED_WORK_UNITS),),
             )
 
         self._prune_job_history_for_insert()
@@ -619,7 +706,10 @@ class ColorDocument:
         except StopIteration as completed:
             candidate = completed.value
             try:
-                if not isinstance(candidate, (PreviewCandidate, ExportCandidate)):
+                if not isinstance(
+                    candidate,
+                    (PreviewCandidate, FullResolutionCandidate, ExportCandidate),
+                ):
                     self._fail_job(
                         record,
                         self._diagnostic(
@@ -676,7 +766,7 @@ class ColorDocument:
     def _complete_job(
         self,
         record: _JobRecord,
-        candidate: PreviewCandidate | ExportCandidate,
+        candidate: PreviewCandidate | FullResolutionCandidate | ExportCandidate,
     ) -> None:
         latest = self._latest_job_by_purpose.get(record.purpose)
         if latest != record.job_id or not self._job_basis_is_current(record):
@@ -713,6 +803,27 @@ class ColorDocument:
             )
             self._state = replace(self._state, preview=preview)
         elif (
+            record.purpose is JobPurpose.FULL_RESOLUTION_EVALUATION
+            and isinstance(candidate, FullResolutionCandidate)
+        ):
+            processed = self._new_surface(
+                record,
+                candidate,
+                SurfacePurpose.PROCESSED_FULL_RESOLUTION,
+                candidate.processed_pixels,
+                viewing_status="not-rendered-with-proof-or-display",
+            )
+            result = FullResolutionResult(
+                job_id=record.job_id,
+                basis=record.basis,
+                processed=processed,
+            )
+            if FULL_RESOLUTION_RETAINED_RESULTS != 1:
+                raise RuntimeError(
+                    "The full-resolution retention policy must keep one result."
+                )
+            self._state = replace(self._state, full_resolution=result)
+        elif (
             record.purpose is JobPurpose.CANONICAL_PORTABLE_CUBE_EXPORT
             and isinstance(candidate, ExportCandidate)
         ):
@@ -747,9 +858,11 @@ class ColorDocument:
     def _new_surface(
         self,
         record: _JobRecord,
-        candidate: PreviewCandidate,
+        candidate: PreviewCandidate | FullResolutionCandidate,
         purpose: SurfacePurpose,
         pixels: bytes,
+        *,
+        viewing_status: str = "provisional-unmanaged",
     ) -> DerivedSurfaceSnapshot:
         surface = DerivedSurfaceSnapshot(
             surface_id=SurfaceId(self._next_surface_id),
@@ -760,6 +873,7 @@ class ColorDocument:
             row_stride=candidate.row_stride,
             encoding=SurfaceEncoding.RGB_F32_BE,
             pixels=pixels,
+            viewing_status=viewing_status,
         )
         self._next_surface_id += 1
         return surface
@@ -843,6 +957,12 @@ class ColorDocument:
                 and record.basis.interpretation == current.interpretation
                 and record.basis.viewing == current.viewing
             )
+        if record.purpose is JobPurpose.FULL_RESOLUTION_EVALUATION:
+            return (
+                record.basis.reference == current.reference
+                and record.basis.transformation == current.transformation
+                and record.basis.interpretation == current.interpretation
+            )
         if record.purpose is JobPurpose.CANONICAL_PORTABLE_CUBE_EXPORT:
             return record.basis.transformation == current.transformation
         return False
@@ -858,7 +978,7 @@ class ColorDocument:
         )
 
     def _prune_job_history_for_insert(self) -> None:
-        while len(self._jobs) >= _JOB_HISTORY_LIMIT:
+        while len(self._jobs) >= DOCUMENT_JOB_HISTORY_LIMIT:
             terminal_id = next(
                 (
                     job_id
@@ -870,6 +990,34 @@ class ColorDocument:
             if terminal_id is None:
                 break
             del self._jobs[terminal_id]
+
+    @staticmethod
+    def _full_resolution_storage_is_admissible(reference: DecodedImage) -> bool:
+        return (
+            _bounded_product(
+                (reference.width, reference.height),
+                FULL_RESOLUTION_MAX_PIXELS,
+            )
+            is not None
+            and _bounded_product(
+                (
+                    reference.width,
+                    reference.height,
+                    FULL_RESOLUTION_BYTES_PER_PIXEL,
+                ),
+                FULL_RESOLUTION_MAX_OUTPUT_BYTES,
+            )
+            is not None
+            and _bounded_product(
+                (
+                    reference.width,
+                    reference.height,
+                    FULL_RESOLUTION_BYTES_PER_PIXEL,
+                ),
+                FULL_RESOLUTION_MAX_SCRATCH_BYTES,
+            )
+            is not None
+        )
 
     def _touch(self) -> None:
         self._snapshot_revision = SnapshotRevision(
@@ -921,3 +1069,14 @@ class ColorDocument:
                 DiagnosticField(name=name, value=value) for name, value in context
             ),
         )
+
+
+def _bounded_product(factors: tuple[int, ...], maximum: int) -> int | None:
+    """Multiply positive resource dimensions without exceeding a limit."""
+
+    value = 1
+    for factor in factors:
+        if factor <= 0 or value > maximum // factor:
+            return None
+        value *= factor
+    return value

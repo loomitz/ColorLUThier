@@ -361,6 +361,57 @@ class EvidenceSuiteSummaryTest(unittest.TestCase):
                 run_suite("full", root)
 
 
+class WindowsEvidenceLauncherTest(unittest.TestCase):
+    def child_arguments(self, status):
+        return [sys.executable, "-B", "-c",
+                "import json,sys;print(json.dumps(sys.argv[1:]));sys.exit(" + str(status) + ")",
+                "value with spaces", 'value with "quotes"', "C:\\synthetic path\\trailing\\"]
+
+    def assert_child_result(self, result, arguments, status):
+        self.assertEqual(result.returncode, status)
+        self.assertEqual(result.stderr, b"")
+        self.assertEqual(json.loads(result.stdout), arguments[4:])
+
+    def test_windows_overlay_model_preserves_real_child_status_and_arguments(self):
+        # Model the Windows CRT overlay distinction on every native test host.
+        # This is not evidence of a native Windows run. A correct launcher must
+        # continue waiting even on an OS where execv exits its caller early.
+        source = (
+            "import os,subprocess,sys\n"
+            "from headless_engine_evidence import _windows_launch\n"
+            "def windows_overlay(executable,argv):\n"
+            "    subprocess.Popen(argv)\n"
+            "    os._exit(0)\n"
+            "os.execv = windows_overlay\n"
+            "sys.argv = ['launcher', *sys.argv[1:]]\n"
+            "raise SystemExit(_windows_launch.main())\n"
+        )
+        for status in (0, 2, 7):
+            arguments = self.child_arguments(status)
+            with self.subTest(status=status):
+                result = subprocess.run([sys.executable, "-B", "-c", source, *arguments],
+                                        cwd=ROOT, input=b"\x00", capture_output=True, timeout=20)
+                self.assert_child_result(result, arguments, status)
+
+    def test_native_launcher_preserves_real_child_status_and_arguments(self):
+        for status in (0, 2, 7):
+            arguments = self.child_arguments(status)
+            with self.subTest(status=status):
+                result = subprocess.run([sys.executable, "-B", "-m", "headless_engine_evidence._windows_launch", *arguments],
+                                        cwd=ROOT, input=b"\x00", capture_output=True, timeout=20)
+                self.assert_child_result(result, arguments, status)
+
+    def test_launcher_requires_assignment_handshake_and_sanitizes_launch_failure(self):
+        for handshake, status in ((b"", 2), (b"\x00", 3)):
+            with self.subTest(status=status):
+                result = subprocess.run([sys.executable, "-B", "-m", "headless_engine_evidence._windows_launch",
+                                         "synthetic-missing-executable"], cwd=ROOT, input=handshake,
+                                        capture_output=True, timeout=20)
+                self.assertEqual(result.returncode, status)
+                self.assertEqual(result.stdout, b"")
+                self.assertEqual(result.stderr, b"")
+
+
 class EvidenceCollectionTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
